@@ -32,8 +32,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
+import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventListener;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
+import org.whispersystems.textsecuregcm.tests.util.DevicesHelper;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -47,11 +51,12 @@ class MessagePersisterIntegrationTest {
   @RegisterExtension
   static final RedisClusterExtension REDIS_CLUSTER_EXTENSION = RedisClusterExtension.builder().build();
 
-  private ExecutorService notificationExecutorService;
   private Scheduler messageDeliveryScheduler;
   private ExecutorService messageDeletionExecutorService;
+  private ExecutorService websocketConnectionEventExecutor;
   private MessagesCache messagesCache;
   private MessagesManager messagesManager;
+  private WebSocketConnectionEventManager webSocketConnectionEventManager;
   private MessagePersister messagePersister;
   private Account account;
 
@@ -61,7 +66,6 @@ class MessagePersisterIntegrationTest {
   void setUp() throws Exception {
     REDIS_CLUSTER_EXTENSION.getRedisCluster().useCluster(connection -> {
       connection.sync().flushall();
-      connection.sync().upstream().commands().configSet("notify-keyspace-events", "K$glz");
     });
 
     @SuppressWarnings("unchecked") final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager =
@@ -76,12 +80,19 @@ class MessagePersisterIntegrationTest {
         messageDeletionExecutorService);
     final AccountsManager accountsManager = mock(AccountsManager.class);
 
-    notificationExecutorService = Executors.newSingleThreadExecutor();
     messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(),
-        REDIS_CLUSTER_EXTENSION.getRedisCluster(), notificationExecutorService,
         messageDeliveryScheduler, messageDeletionExecutorService, Clock.systemUTC());
     messagesManager = new MessagesManager(messagesDynamoDb, messagesCache, mock(ReportMessageManager.class),
         messageDeletionExecutorService);
+
+    websocketConnectionEventExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    webSocketConnectionEventManager = new WebSocketConnectionEventManager(mock(AccountsManager.class),
+        mock(PushNotificationManager.class),
+        REDIS_CLUSTER_EXTENSION.getRedisCluster(),
+        websocketConnectionEventExecutor);
+
+    webSocketConnectionEventManager.start();
+
     messagePersister = new MessagePersister(messagesCache, messagesManager, accountsManager,
         dynamicConfigurationManager, PERSIST_DELAY, 1);
 
@@ -92,21 +103,22 @@ class MessagePersisterIntegrationTest {
     when(account.getNumber()).thenReturn("+18005551234");
     when(account.getUuid()).thenReturn(accountUuid);
     when(accountsManager.getByAccountIdentifier(accountUuid)).thenReturn(Optional.of(account));
+    when(account.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(DevicesHelper.createDevice(Device.PRIMARY_ID)));
 
     when(dynamicConfigurationManager.getConfiguration()).thenReturn(new DynamicConfiguration());
-
-    messagesCache.start();
   }
 
   @AfterEach
   void tearDown() throws Exception {
-    notificationExecutorService.shutdown();
-    notificationExecutorService.awaitTermination(15, TimeUnit.SECONDS);
-
     messageDeletionExecutorService.shutdown();
     messageDeletionExecutorService.awaitTermination(15, TimeUnit.SECONDS);
 
+    websocketConnectionEventExecutor.shutdown();
+    websocketConnectionEventExecutor.awaitTermination(15, TimeUnit.SECONDS);
+
     messageDeliveryScheduler.dispose();
+
+    webSocketConnectionEventManager.stop();
   }
 
   @Test
@@ -124,29 +136,32 @@ class MessagePersisterIntegrationTest {
 
         final MessageProtos.Envelope message = generateRandomMessage(messageGuid, timestamp);
 
-        messagesCache.insert(messageGuid, account.getUuid(), 1, message);
+        messagesCache.insert(messageGuid, account.getUuid(), Device.PRIMARY_ID, message);
         expectedMessages.add(message);
       }
 
       REDIS_CLUSTER_EXTENSION.getRedisCluster()
           .useCluster(connection -> connection.sync().set(MessagesCache.NEXT_SLOT_TO_PERSIST_KEY,
-              String.valueOf(SlotHash.getSlot(MessagesCache.getMessageQueueKey(account.getUuid(), 1)) - 1)));
+              String.valueOf(
+                  SlotHash.getSlot(MessagesCache.getMessageQueueKey(account.getUuid(), Device.PRIMARY_ID)) - 1)));
 
       final AtomicBoolean messagesPersisted = new AtomicBoolean(false);
 
-      messagesManager.addMessageAvailabilityListener(account.getUuid(), 1, new MessageAvailabilityListener() {
+      webSocketConnectionEventManager.handleClientConnected(account.getUuid(), Device.PRIMARY_ID, new WebSocketConnectionEventListener() {
         @Override
-        public boolean handleNewMessagesAvailable() {
-          return true;
+        public void handleNewMessageAvailable() {
         }
 
         @Override
-        public boolean handleMessagesPersisted() {
+        public void handleMessagesPersisted() {
           synchronized (messagesPersisted) {
             messagesPersisted.set(true);
             messagesPersisted.notifyAll();
-            return true;
           }
+        }
+
+        @Override
+        public void handleConnectionDisplaced(final boolean connectedElsewhere) {
         }
       });
 
@@ -180,12 +195,12 @@ class MessagePersisterIntegrationTest {
 
   private MessageProtos.Envelope generateRandomMessage(final UUID messageGuid, final long serverTimestamp) {
     return MessageProtos.Envelope.newBuilder()
-        .setTimestamp(serverTimestamp * 2) // client timestamp may not be accurate
+        .setClientTimestamp(serverTimestamp * 2) // client timestamp may not be accurate
         .setServerTimestamp(serverTimestamp)
-        .setContent(ByteString.copyFromUtf8(RandomStringUtils.randomAlphanumeric(256)))
+        .setContent(ByteString.copyFromUtf8(RandomStringUtils.secure().nextAlphanumeric(256)))
         .setType(MessageProtos.Envelope.Type.CIPHERTEXT)
         .setServerGuid(messageGuid.toString())
-        .setDestinationUuid(UUID.randomUUID().toString())
+        .setDestinationServiceId(UUID.randomUUID().toString())
         .build();
   }
 }

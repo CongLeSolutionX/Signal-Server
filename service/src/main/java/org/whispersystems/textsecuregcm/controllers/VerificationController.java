@@ -15,6 +15,28 @@ import io.grpc.StatusRuntimeException;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.ServerErrorException;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -31,58 +53,39 @@ import java.util.Optional;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.ForbiddenException;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.PATCH;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.ServerErrorException;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.http.HttpStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.captcha.AssessmentResult;
 import org.whispersystems.textsecuregcm.captcha.RegistrationCaptchaManager;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.CreateVerificationSessionRequest;
 import org.whispersystems.textsecuregcm.entities.RegistrationServiceSession;
 import org.whispersystems.textsecuregcm.entities.SubmitVerificationCodeRequest;
 import org.whispersystems.textsecuregcm.entities.UpdateVerificationSessionRequest;
 import org.whispersystems.textsecuregcm.entities.VerificationCodeRequest;
 import org.whispersystems.textsecuregcm.entities.VerificationSessionResponse;
-import org.whispersystems.textsecuregcm.limits.RateLimiter;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.push.PushNotification;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
 import org.whispersystems.textsecuregcm.registration.ClientType;
 import org.whispersystems.textsecuregcm.registration.MessageTransport;
+import org.whispersystems.textsecuregcm.registration.RegistrationFraudException;
 import org.whispersystems.textsecuregcm.registration.RegistrationServiceClient;
 import org.whispersystems.textsecuregcm.registration.RegistrationServiceException;
 import org.whispersystems.textsecuregcm.registration.RegistrationServiceSenderException;
 import org.whispersystems.textsecuregcm.registration.TransportNotAllowedException;
 import org.whispersystems.textsecuregcm.registration.VerificationSession;
-import org.whispersystems.textsecuregcm.spam.Extract;
-import org.whispersystems.textsecuregcm.spam.FilterSpam;
-import org.whispersystems.textsecuregcm.spam.ScoreThreshold;
+import org.whispersystems.textsecuregcm.spam.RegistrationFraudChecker;
+import org.whispersystems.textsecuregcm.spam.RegistrationFraudChecker.VerificationCheck;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.RegistrationRecoveryPasswordsManager;
 import org.whispersystems.textsecuregcm.storage.VerificationSessionManager;
 import org.whispersystems.textsecuregcm.util.ExceptionUtils;
-import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.textsecuregcm.util.Util;
 
@@ -115,7 +118,8 @@ public class VerificationController {
   private final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager;
   private final RateLimiters rateLimiters;
   private final AccountsManager accountsManager;
-
+  private final RegistrationFraudChecker registrationFraudChecker;
+  private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
   private final Clock clock;
 
   public VerificationController(final RegistrationServiceClient registrationServiceClient,
@@ -125,6 +129,8 @@ public class VerificationController {
       final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager,
       final RateLimiters rateLimiters,
       final AccountsManager accountsManager,
+      final RegistrationFraudChecker registrationFraudChecker,
+      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final Clock clock) {
     this.registrationServiceClient = registrationServiceClient;
     this.verificationSessionManager = verificationSessionManager;
@@ -133,6 +139,8 @@ public class VerificationController {
     this.registrationRecoveryPasswordsManager = registrationRecoveryPasswordsManager;
     this.rateLimiters = rateLimiters;
     this.accountsManager = accountsManager;
+    this.registrationFraudChecker = registrationFraudChecker;
+    this.dynamicConfigurationManager = dynamicConfigurationManager;
     this.clock = clock;
   }
 
@@ -164,16 +172,14 @@ public class VerificationController {
     } catch (final CompletionException e) {
 
       if (ExceptionUtils.unwrap(e) instanceof RateLimitExceededException re) {
-        RateLimiter.adaptLegacyException(() -> {
-          throw re;
-        });
+        throw re;
       }
 
       throw new ServerErrorException(Response.Status.INTERNAL_SERVER_ERROR, e);
     }
 
     VerificationSession verificationSession = new VerificationSession(null, new ArrayList<>(),
-        Collections.emptyList(), false,
+        Collections.emptyList(), null, null, false,
         clock.millis(), clock.millis(), registrationServiceSession.expiration());
 
     verificationSession = handlePushToken(pushTokenAndType, verificationSession);
@@ -186,18 +192,18 @@ public class VerificationController {
     return buildResponse(registrationServiceSession, verificationSession);
   }
 
-  @FilterSpam
   @PATCH
   @Path("/session/{sessionId}")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  public VerificationSessionResponse updateSession(@PathParam("sessionId") final String encodedSessionId,
-      @HeaderParam(com.google.common.net.HttpHeaders.X_FORWARDED_FOR) String forwardedFor,
+  public VerificationSessionResponse updateSession(
+      @PathParam("sessionId") final String encodedSessionId,
       @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent,
+      @Context ContainerRequestContext requestContext,
       @NotNull @Valid final UpdateVerificationSessionRequest updateVerificationSessionRequest,
-      @NotNull @Extract final ScoreThreshold captchaScoreThreshold) {
+      @Context ContainerRequestContext context) {
 
-    final String sourceHost = HeaderUtils.getMostRecentProxy(forwardedFor).orElseThrow();
+    final String sourceHost = (String) requestContext.getProperty(RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME);
 
     final Pair<String, PushNotification.TokenType> pushTokenAndType = validateAndExtractPushToken(
         updateVerificationSessionRequest);
@@ -205,15 +211,24 @@ public class VerificationController {
     final RegistrationServiceSession registrationServiceSession = retrieveRegistrationServiceSession(encodedSessionId);
     VerificationSession verificationSession = retrieveVerificationSession(registrationServiceSession);
 
+    final VerificationCheck verificationCheck = registrationFraudChecker.checkVerificationAttempt(
+        context,
+        verificationSession,
+        registrationServiceSession.number(),
+        updateVerificationSessionRequest);
+
     try {
       // these handle* methods ordered from least likely to fail to most, so take care when considering a change
+
+      verificationSession = verificationCheck.updatedSession().orElse(verificationSession);
+
       verificationSession = handlePushToken(pushTokenAndType, verificationSession);
 
       verificationSession = handlePushChallenge(updateVerificationSessionRequest, registrationServiceSession,
           verificationSession);
 
       verificationSession = handleCaptcha(sourceHost, updateVerificationSessionRequest, registrationServiceSession,
-          verificationSession, userAgent, captchaScoreThreshold.getScoreThreshold());
+          verificationSession, userAgent, verificationCheck.scoreThreshold());
     } catch (final RateLimitExceededException e) {
 
       final Response response = buildResponseForRateLimitExceeded(verificationSession, registrationServiceSession,
@@ -266,7 +281,8 @@ public class VerificationController {
         requestedInformation.addAll(verificationSession.requestedInformation());
 
         verificationSession = new VerificationSession(generatePushChallenge(), requestedInformation,
-            verificationSession.submittedInformation(), verificationSession.allowedToRequestCode(),
+            verificationSession.submittedInformation(), verificationSession.smsSenderOverride(),
+            verificationSession.voiceSenderOverride(), verificationSession.allowedToRequestCode(),
             verificationSession.createdTimestamp(), clock.millis(), verificationSession.remoteExpirationSeconds()
         );
       }
@@ -299,9 +315,8 @@ public class VerificationController {
 
     final boolean pushChallengePresent = updateVerificationSessionRequest.pushChallenge() != null;
     if (pushChallengePresent) {
-      RateLimiter.adaptLegacyException(
-          () -> rateLimiters.getVerificationPushChallengeLimiter()
-              .validate(registrationServiceSession.encodedSessionId()));
+      rateLimiters.getVerificationPushChallengeLimiter()
+          .validate(registrationServiceSession.encodedSessionId());
     }
 
     final boolean pushChallengeMatches;
@@ -334,7 +349,8 @@ public class VerificationController {
           && requestedInformation.isEmpty();
 
       verificationSession = new VerificationSession(verificationSession.pushChallenge(), requestedInformation,
-          submittedInformation, allowedToRequestCode, verificationSession.createdTimestamp(), clock.millis(),
+          submittedInformation, verificationSession.smsSenderOverride(), verificationSession.voiceSenderOverride(),
+          allowedToRequestCode, verificationSession.createdTimestamp(), clock.millis(),
           verificationSession.remoteExpirationSeconds());
 
     } else if (pushChallengePresent) {
@@ -363,14 +379,14 @@ public class VerificationController {
       return verificationSession;
     }
 
-    RateLimiter.adaptLegacyException(
-        () -> rateLimiters.getVerificationCaptchaLimiter().validate(registrationServiceSession.encodedSessionId()));
+    rateLimiters.getVerificationCaptchaLimiter().validate(registrationServiceSession.encodedSessionId());
 
     final AssessmentResult assessmentResult;
     try {
 
       assessmentResult = registrationCaptchaManager.assessCaptcha(
-              Optional.of(updateVerificationSessionRequest.captcha()), sourceHost)
+              Optional.empty(),
+              Optional.of(updateVerificationSessionRequest.captcha()), sourceHost, userAgent)
           .orElseThrow(() -> new ServerErrorException(Response.Status.INTERNAL_SERVER_ERROR));
 
       Metrics.counter(CAPTCHA_ATTEMPT_COUNTER_NAME, Tags.of(
@@ -381,8 +397,9 @@ public class VerificationController {
               Tag.of(SCORE_TAG_NAME, assessmentResult.getScoreString())))
           .increment();
 
-    } catch (IOException e) {
-      throw new ServerErrorException(Response.Status.SERVICE_UNAVAILABLE);
+    } catch (final IOException e) {
+      logger.error("error assessing captcha", e);
+      throw new ServerErrorException(Response.Status.SERVICE_UNAVAILABLE, e);
     }
 
     if (assessmentResult.isValid(captchaScoreThreshold)) {
@@ -399,7 +416,8 @@ public class VerificationController {
           && requestedInformation.isEmpty();
 
       verificationSession = new VerificationSession(verificationSession.pushChallenge(), requestedInformation,
-          submittedInformation, allowedToRequestCode, verificationSession.createdTimestamp(), clock.millis(),
+          submittedInformation, verificationSession.smsSenderOverride(), verificationSession.voiceSenderOverride(),
+          allowedToRequestCode, verificationSession.createdTimestamp(), clock.millis(),
           verificationSession.remoteExpirationSeconds());
     } else {
       throw new ForbiddenException();
@@ -462,12 +480,19 @@ public class VerificationController {
       }
     };
 
+    final String senderOverride = switch (messageTransport) {
+      case SMS -> verificationSession.smsSenderOverride();
+      case VOICE -> verificationSession.voiceSenderOverride();
+    };
+
     final RegistrationServiceSession resultSession;
     try {
       resultSession = registrationServiceClient.sendVerificationCode(registrationServiceSession.id(),
           messageTransport,
           clientType,
-          acceptLanguage.orElse(null), REGISTRATION_RPC_TIMEOUT).join();
+          acceptLanguage.orElse(null),
+          senderOverride,
+          REGISTRATION_RPC_TIMEOUT).join();
     } catch (final CancellationException e) {
       throw new ServerErrorException("registration service unavailable", Response.Status.SERVICE_UNAVAILABLE);
     } catch (final CompletionException e) {
@@ -479,7 +504,7 @@ public class VerificationController {
           throw new ClientErrorException(response);
         }
 
-        throw new RateLimitExceededException(rateLimitExceededException.getRetryDuration().orElse(null), false);
+        throw new RateLimitExceededException(rateLimitExceededException.getRetryDuration().orElse(null));
       } else if (unwrappedException instanceof RegistrationServiceException registrationServiceException) {
 
         throw registrationServiceException.getRegistrationSession()
@@ -493,10 +518,14 @@ public class VerificationController {
             })
             .orElseGet(NotFoundException::new);
 
+      } else if (unwrappedException instanceof RegistrationFraudException) {
+        if (dynamicConfigurationManager.getConfiguration().getRegistrationConfiguration().squashDeclinedAttemptErrors()) {
+          return buildResponse(registrationServiceSession, verificationSession);
+        } else {
+          throw unwrappedException.getCause();
+        }
       } else if (unwrappedException instanceof RegistrationServiceSenderException) {
-
         throw unwrappedException;
-
       } else {
         logger.error("Registration service failure", unwrappedException);
         throw new ServerErrorException(Response.Status.INTERNAL_SERVER_ERROR);
@@ -552,7 +581,7 @@ public class VerificationController {
           throw new ClientErrorException(response);
         }
 
-        throw new RateLimitExceededException(rateLimitExceededException.getRetryDuration().orElse(null), false);
+        throw new RateLimitExceededException(rateLimitExceededException.getRetryDuration().orElse(null));
 
       } else if (unwrappedException instanceof RegistrationServiceException registrationServiceException) {
 

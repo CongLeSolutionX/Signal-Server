@@ -17,22 +17,22 @@ import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.whispersystems.textsecuregcm.auth.BasicAuthorizationHeader;
 import org.whispersystems.textsecuregcm.auth.PhoneVerificationTokenManager;
 import org.whispersystems.textsecuregcm.auth.RegistrationLockVerificationManager;
@@ -40,13 +40,12 @@ import org.whispersystems.textsecuregcm.entities.AccountIdentityResponse;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
 import org.whispersystems.textsecuregcm.entities.RegistrationLockFailure;
 import org.whispersystems.textsecuregcm.entities.RegistrationRequest;
-import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
-import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.KeysManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
+import org.whispersystems.textsecuregcm.storage.DeviceSpec;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.Util;
 
@@ -64,24 +63,21 @@ public class RegistrationController {
   private static final String COUNTRY_CODE_TAG_NAME = "countryCode";
   private static final String REGION_CODE_TAG_NAME = "regionCode";
   private static final String VERIFICATION_TYPE_TAG_NAME = "verification";
-  private static final String ACCOUNT_ACTIVATED_TAG_NAME = "accountActivated";
   private static final String INVALID_ACCOUNT_ATTRS_COUNTER_NAME = name(RegistrationController.class, "invalidAccountAttrs");
 
   private final AccountsManager accounts;
   private final PhoneVerificationTokenManager phoneVerificationTokenManager;
   private final RegistrationLockVerificationManager registrationLockVerificationManager;
-  private final KeysManager keysManager;
   private final RateLimiters rateLimiters;
 
   public RegistrationController(final AccountsManager accounts,
                                 final PhoneVerificationTokenManager phoneVerificationTokenManager,
                                 final RegistrationLockVerificationManager registrationLockVerificationManager,
-                                final KeysManager keysManager,
                                 final RateLimiters rateLimiters) {
+
     this.accounts = accounts;
     this.phoneVerificationTokenManager = phoneVerificationTokenManager;
     this.registrationLockVerificationManager = registrationLockVerificationManager;
-    this.keysManager = keysManager;
     this.rateLimiters = rateLimiters;
   }
 
@@ -108,19 +104,20 @@ public class RegistrationController {
       @HeaderParam(HttpHeaders.AUTHORIZATION) @NotNull final BasicAuthorizationHeader authorizationHeader,
       @HeaderParam(HeaderUtils.X_SIGNAL_AGENT) final String signalAgent,
       @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent,
-      @NotNull @Valid final RegistrationRequest registrationRequest) throws RateLimitExceededException, InterruptedException {
+      @NotNull @Valid final RegistrationRequest registrationRequest,
+      @Context final ContainerRequestContext requestContext) throws RateLimitExceededException, InterruptedException {
 
     final String number = authorizationHeader.getUsername();
     final String password = authorizationHeader.getPassword();
 
-    RateLimiter.adaptLegacyException(() -> rateLimiters.getRegistrationLimiter().validate(number));
-    if (!AccountsManager.validNewAccountAttributes(registrationRequest.accountAttributes())) {
-      Metrics.counter(INVALID_ACCOUNT_ATTRS_COUNTER_NAME, Tags.of(UserAgentTagUtil.getPlatformTag(userAgent))).increment();
-      throw new WebApplicationException(Response.status(422, "account attributes invalid").build());
+    if (!registrationRequest.isEverySignedKeyValid(userAgent)) {
+      throw new WebApplicationException("Invalid signature", 422);
     }
 
-    final PhoneVerificationRequest.VerificationType verificationType = phoneVerificationTokenManager.verify(number,
-        registrationRequest);
+    rateLimiters.getRegistrationLimiter().validate(number);
+
+    final PhoneVerificationRequest.VerificationType verificationType = phoneVerificationTokenManager.verify(
+        requestContext, number, registrationRequest);
 
     final Optional<Account> existingAccount = accounts.getByE164(number);
 
@@ -130,72 +127,51 @@ public class RegistrationController {
       REREGISTRATION_IDLE_DAYS_DISTRIBUTION.record(timeSinceLastSeen.toDays());
     });
 
+    if (!registrationRequest.skipDeviceTransfer() && existingAccount.map(account -> account.hasCapability(DeviceCapability.TRANSFER)).orElse(false)) {
+      // If a device transfer is possible, clients must explicitly opt out of a transfer (i.e. after prompting the user)
+      // before we'll let them create a new account "from scratch"
+      throw new WebApplicationException(Response.status(409, "device transfer available").build());
+    }
+
     if (existingAccount.isPresent()) {
       registrationLockVerificationManager.verifyRegistrationLock(existingAccount.get(),
           registrationRequest.accountAttributes().getRegistrationLock(),
           userAgent, RegistrationLockVerificationManager.Flow.REGISTRATION, verificationType);
     }
 
-    if (!registrationRequest.skipDeviceTransfer() && existingAccount.map(Account::isTransferSupported).orElse(false)) {
-      // If a device transfer is possible, clients must explicitly opt out of a transfer (i.e. after prompting the user)
-      // before we'll let them create a new account "from scratch"
-      throw new WebApplicationException(Response.status(409, "device transfer available").build());
-    }
-
-    Account account = accounts.create(number, password, signalAgent, registrationRequest.accountAttributes(),
-        existingAccount.map(Account::getBadges).orElseGet(ArrayList::new));
-
-    // If the request includes all the information we need to fully "activate" the account, we should do so
-    if (registrationRequest.supportsAtomicAccountCreation()) {
-      assert registrationRequest.aciIdentityKey().isPresent();
-      assert registrationRequest.pniIdentityKey().isPresent();
-      assert registrationRequest.deviceActivationRequest().aciSignedPreKey().isPresent();
-      assert registrationRequest.deviceActivationRequest().pniSignedPreKey().isPresent();
-      assert registrationRequest.deviceActivationRequest().aciPqLastResortPreKey().isPresent();
-      assert registrationRequest.deviceActivationRequest().pniPqLastResortPreKey().isPresent();
-
-      account = accounts.update(account, a -> {
-        a.setIdentityKey(registrationRequest.aciIdentityKey().get());
-        a.setPhoneNumberIdentityKey(registrationRequest.pniIdentityKey().get());
-
-        final Device device = a.getMasterDevice().orElseThrow();
-
-        device.setSignedPreKey(registrationRequest.deviceActivationRequest().aciSignedPreKey().get());
-        device.setPhoneNumberIdentitySignedPreKey(registrationRequest.deviceActivationRequest().pniSignedPreKey().get());
-
-        registrationRequest.deviceActivationRequest().apnToken().ifPresent(apnRegistrationId -> {
-          device.setApnId(apnRegistrationId.apnRegistrationId());
-          device.setVoipApnId(apnRegistrationId.voipRegistrationId());
-        });
-
-        registrationRequest.deviceActivationRequest().gcmToken().ifPresent(gcmRegistrationId ->
-            device.setGcmId(gcmRegistrationId.gcmRegistrationId()));
-
-        CompletableFuture.allOf(
-                keysManager.storeEcSignedPreKeys(a.getUuid(),
-                    Map.of(Device.MASTER_ID, registrationRequest.deviceActivationRequest().aciSignedPreKey().get())),
-                keysManager.storePqLastResort(a.getUuid(),
-                    Map.of(Device.MASTER_ID, registrationRequest.deviceActivationRequest().aciPqLastResortPreKey().get())),
-                keysManager.storeEcSignedPreKeys(a.getPhoneNumberIdentifier(),
-                    Map.of(Device.MASTER_ID, registrationRequest.deviceActivationRequest().pniSignedPreKey().get())),
-                keysManager.storePqLastResort(a.getPhoneNumberIdentifier(),
-                    Map.of(Device.MASTER_ID, registrationRequest.deviceActivationRequest().pniPqLastResortPreKey().get())))
-            .join();
-      });
-    }
+    final Account account = accounts.create(number,
+        registrationRequest.accountAttributes(),
+        existingAccount.map(Account::getBadges).orElseGet(ArrayList::new),
+        registrationRequest.aciIdentityKey(),
+        registrationRequest.pniIdentityKey(),
+        new DeviceSpec(
+            registrationRequest.accountAttributes().getName(),
+            password,
+            signalAgent,
+            registrationRequest.accountAttributes().getCapabilities(),
+            registrationRequest.accountAttributes().getRegistrationId(),
+            registrationRequest.accountAttributes().getPhoneNumberIdentityRegistrationId(),
+            registrationRequest.accountAttributes().getFetchesMessages(),
+            registrationRequest.deviceActivationRequest().apnToken(),
+            registrationRequest.deviceActivationRequest().gcmToken(),
+            registrationRequest.deviceActivationRequest().aciSignedPreKey(),
+            registrationRequest.deviceActivationRequest().pniSignedPreKey(),
+            registrationRequest.deviceActivationRequest().aciPqLastResortPreKey(),
+            registrationRequest.deviceActivationRequest().pniPqLastResortPreKey()),
+        userAgent);
 
     Metrics.counter(ACCOUNT_CREATED_COUNTER_NAME, Tags.of(UserAgentTagUtil.getPlatformTag(userAgent),
             Tag.of(COUNTRY_CODE_TAG_NAME, Util.getCountryCode(number)),
             Tag.of(REGION_CODE_TAG_NAME, Util.getRegion(number)),
-            Tag.of(VERIFICATION_TYPE_TAG_NAME, verificationType.name()),
-            Tag.of(ACCOUNT_ACTIVATED_TAG_NAME, String.valueOf(account.isEnabled()))))
+            Tag.of(VERIFICATION_TYPE_TAG_NAME, verificationType.name())))
         .increment();
 
     return new AccountIdentityResponse(account.getUuid(),
         account.getNumber(),
         account.getPhoneNumberIdentifier(),
         account.getUsernameHash().orElse(null),
-        existingAccount.map(Account::isStorageSupported).orElse(false));
+        account.getUsernameLinkHandle(),
+        existingAccount.map(a -> a.hasCapability(DeviceCapability.STORAGE)).orElse(false));
   }
 
 }

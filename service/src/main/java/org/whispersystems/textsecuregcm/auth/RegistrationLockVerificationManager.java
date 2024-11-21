@@ -12,25 +12,26 @@ import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import javax.annotation.Nullable;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.Response;
+import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
 import org.whispersystems.textsecuregcm.entities.RegistrationLockFailure;
+import org.whispersystems.textsecuregcm.entities.Svr3Credentials;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.RegistrationRecoveryPasswordsManager;
-import org.whispersystems.textsecuregcm.util.Util;
 
 public class RegistrationLockVerificationManager {
   public enum Flow {
@@ -53,24 +54,25 @@ public class RegistrationLockVerificationManager {
   private static final String PHONE_VERIFICATION_TYPE_TAG_NAME = "phoneVerificationType";
 
   private final AccountsManager accounts;
-  private final ClientPresenceManager clientPresenceManager;
-  private final ExternalServiceCredentialsGenerator svr1CredentialGenerator;
+  private final DisconnectionRequestManager disconnectionRequestManager;
   private final ExternalServiceCredentialsGenerator svr2CredentialGenerator;
+  private final ExternalServiceCredentialsGenerator svr3CredentialGenerator;
   private final RateLimiters rateLimiters;
   private final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager;
   private final PushNotificationManager pushNotificationManager;
 
   public RegistrationLockVerificationManager(
-      final AccountsManager accounts, final ClientPresenceManager clientPresenceManager,
-      final ExternalServiceCredentialsGenerator svr1CredentialGenerator,
+      final AccountsManager accounts,
+      final DisconnectionRequestManager disconnectionRequestManager,
       final ExternalServiceCredentialsGenerator svr2CredentialGenerator,
+      final ExternalServiceCredentialsGenerator svr3CredentialGenerator,
       final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager,
       final PushNotificationManager pushNotificationManager,
       final RateLimiters rateLimiters) {
     this.accounts = accounts;
-    this.clientPresenceManager = clientPresenceManager;
-    this.svr1CredentialGenerator = svr1CredentialGenerator;
+    this.disconnectionRequestManager = disconnectionRequestManager;
     this.svr2CredentialGenerator = svr2CredentialGenerator;
+    this.svr3CredentialGenerator = svr3CredentialGenerator;
     this.registrationRecoveryPasswordsManager = registrationRecoveryPasswordsManager;
     this.pushNotificationManager = pushNotificationManager;
     this.rateLimiters = rateLimiters;
@@ -109,7 +111,7 @@ public class RegistrationLockVerificationManager {
         throw new RuntimeException("Unexpected status: " + existingRegistrationLock.getStatus());
     }
 
-    if (!Util.isEmpty(clientRegistrationLock)) {
+    if (StringUtils.isNotEmpty(clientRegistrationLock)) {
       rateLimiters.getPinLimiter().validate(account.getNumber());
     }
 
@@ -141,9 +143,6 @@ public class RegistrationLockVerificationManager {
       // Freezing the existing account credentials will definitively start the reglock timeout.
       // Until the timeout, the current reglock can still be supplied,
       // along with phone number verification, to restore access.
-      final ExternalServiceCredentials existingSvr1Credentials = svr1CredentialGenerator.generateForUuid(account.getUuid());
-      final ExternalServiceCredentials existingSvr2Credentials = svr2CredentialGenerator.generateForUuid(account.getUuid());
-
       final Account updatedAccount;
       if (!alreadyLocked) {
         updatedAccount = accounts.update(account, Account::lockAuthTokenHash);
@@ -161,8 +160,8 @@ public class RegistrationLockVerificationManager {
         registrationRecoveryPasswordsManager.removeForNumber(updatedAccount.getNumber());
       }
 
-      final List<Long> deviceIds = updatedAccount.getDevices().stream().map(Device::getId).toList();
-      clientPresenceManager.disconnectAllPresences(updatedAccount.getUuid(), deviceIds);
+      final List<Byte> deviceIds = updatedAccount.getDevices().stream().map(Device::getId).toList();
+      disconnectionRequestManager.requestDisconnection(updatedAccount.getUuid(), deviceIds);
 
       try {
         // Send a push notification that prompts the client to attempt login and fail due to locked credentials
@@ -172,12 +171,28 @@ public class RegistrationLockVerificationManager {
       }
 
       throw new WebApplicationException(Response.status(FAILURE_HTTP_STATUS)
-          .entity(new RegistrationLockFailure(existingRegistrationLock.getTimeRemaining().toMillis(),
-              existingRegistrationLock.needsFailureCredentials() ? existingSvr1Credentials : null,
-              existingRegistrationLock.needsFailureCredentials() ? existingSvr2Credentials : null))
+          .entity(new RegistrationLockFailure(
+              existingRegistrationLock.getTimeRemaining().toMillis(),
+              svr2FailureCredentials(existingRegistrationLock, updatedAccount),
+              svr3FailureCredentials(existingRegistrationLock, updatedAccount)))
           .build());
     }
 
     rateLimiters.getPinLimiter().clear(phoneNumber);
+  }
+
+  private @Nullable ExternalServiceCredentials svr2FailureCredentials(final StoredRegistrationLock existingRegistrationLock, final Account account) {
+    if (!existingRegistrationLock.needsFailureCredentials()) {
+      return null;
+    }
+    return svr2CredentialGenerator.generateForUuid(account.getUuid());
+  }
+
+  private @Nullable Svr3Credentials svr3FailureCredentials(final StoredRegistrationLock existingRegistrationLock, final Account account) {
+    if (!existingRegistrationLock.needsFailureCredentials()) {
+      return null;
+    }
+    final ExternalServiceCredentials creds = svr3CredentialGenerator.generateForUuid(account.getUuid());
+    return new Svr3Credentials(creds.username(), creds.password(), account.getSvr3ShareSet());
   }
 }

@@ -5,12 +5,11 @@
 
 package org.whispersystems.textsecuregcm.configuration;
 
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
-import org.whispersystems.textsecuregcm.configuration.secrets.SecretString;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 
-public record CdnConfiguration(@NotNull SecretString accessKey,
-                               @NotNull SecretString accessSecret,
+public record CdnConfiguration(@NotNull @Valid StaticAwsCredentialsFactory credentials,
                                @NotBlank String bucket,
                                @NotBlank String region) {
 }

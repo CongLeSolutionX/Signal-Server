@@ -14,13 +14,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
-import javax.validation.Valid;
-import javax.validation.constraints.AssertTrue;
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
+import org.whispersystems.textsecuregcm.util.RegistrationIdValidator;
 
 public record ChangeNumberRequest(
     @Schema(description="""
@@ -54,7 +55,7 @@ public record ChangeNumberRequest(
     @Schema(description="""
         A new signed elliptic-curve prekey for each enabled device on the account, including this one.
         Each must be accompanied by a valid signature from the new identity key in this request.""")
-    @NotNull @Valid Map<Long, @NotNull @Valid ECSignedPreKey> devicePniSignedPrekeys,
+    @NotNull @Valid Map<Byte, @NotNull @Valid ECSignedPreKey> devicePniSignedPrekeys,
 
     @Schema(description="""
         A new signed post-quantum last-resort prekey for each enabled device on the account, including this one.
@@ -62,13 +63,12 @@ public record ChangeNumberRequest(
         If present, must contain one prekey per enabled device including this one.
         Prekeys for devices that did not previously have any post-quantum prekeys stored will be silently dropped.
         Each must be accompanied by a valid signature from the new identity key in this request.""")
-    @Valid Map<Long, @NotNull @Valid KEMSignedPreKey> devicePniPqLastResortPrekeys,
+    @Valid Map<Byte, @NotNull @Valid KEMSignedPreKey> devicePniPqLastResortPrekeys,
 
     @Schema(description="the new phone-number-identity registration ID for each enabled device on the account, including this one")
-    @NotNull Map<Long, Integer> pniRegistrationIds) implements PhoneVerificationRequest {
+    @NotNull Map<Byte, Integer> pniRegistrationIds) implements PhoneVerificationRequest {
 
-  @AssertTrue
-  public boolean isSignatureValidOnEachSignedPreKey() {
+  public boolean isSignatureValidOnEachSignedPreKey(@Nullable final String userAgent) {
     List<SignedPreKey<?>> spks = new ArrayList<>();
     if (devicePniSignedPrekeys != null) {
       spks.addAll(devicePniSignedPrekeys.values());
@@ -76,6 +76,11 @@ public record ChangeNumberRequest(
     if (devicePniPqLastResortPrekeys != null) {
       spks.addAll(devicePniPqLastResortPrekeys.values());
     }
-    return spks.isEmpty() || PreKeySignatureValidator.validatePreKeySignatures(pniIdentityKey, spks);
+    return spks.isEmpty() || PreKeySignatureValidator.validatePreKeySignatures(pniIdentityKey, spks, userAgent, "change-number");
+  }
+
+  @AssertTrue
+  public boolean isEachPniRegistrationIdValid() {
+    return pniRegistrationIds == null || pniRegistrationIds.values().stream().allMatch(RegistrationIdValidator::validRegistrationId);
   }
 }

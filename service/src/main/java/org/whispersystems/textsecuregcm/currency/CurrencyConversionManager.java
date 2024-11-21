@@ -1,3 +1,8 @@
+/*
+ * Copyright 2023 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 package org.whispersystems.textsecuregcm.currency;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -5,21 +10,24 @@ import io.dropwizard.lifecycle.Managed;
 import io.lettuce.core.SetArgs;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.entities.CurrencyConversionEntity;
 import org.whispersystems.textsecuregcm.entities.CurrencyConversionEntityList;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
-import org.whispersystems.textsecuregcm.util.Util;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 
 public class CurrencyConversionManager implements Managed {
 
@@ -32,31 +40,42 @@ public class CurrencyConversionManager implements Managed {
 
   @VisibleForTesting
   static final String COIN_MARKET_CAP_SHARED_CACHE_CURRENT_KEY = "CurrencyConversionManager::CoinMarketCapCacheCurrent";
+
   private static final String COIN_MARKET_CAP_SHARED_CACHE_DATA_KEY = "CurrencyConversionManager::CoinMarketCapCacheData";
 
-  private final FixerClient  fixerClient;
+  private final FixerClient fixerClient;
+
   private final CoinMarketCapClient coinMarketCapClient;
-  private final FaultTolerantRedisCluster cacheCluster;
+
+  private final FaultTolerantRedisClusterClient cacheCluster;
+
   private final Clock clock;
 
   private final List<String> currencies;
+
+  private final ScheduledExecutorService executor;
 
   private final AtomicReference<CurrencyConversionEntityList> cached = new AtomicReference<>(null);
 
   private Instant fixerUpdatedTimestamp = Instant.MIN;
 
   private Map<String, BigDecimal> cachedFixerValues;
+
   private Map<String, BigDecimal> cachedCoinMarketCapValues;
 
-  public CurrencyConversionManager(final FixerClient fixerClient,
+
+  public CurrencyConversionManager(
+      final FixerClient fixerClient,
       final CoinMarketCapClient coinMarketCapClient,
-      final FaultTolerantRedisCluster cacheCluster,
+      final FaultTolerantRedisClusterClient cacheCluster,
       final List<String> currencies,
+      final ScheduledExecutorService executor,
       final Clock clock) {
     this.fixerClient = fixerClient;
     this.coinMarketCapClient = coinMarketCapClient;
     this.cacheCluster = cacheCluster;
     this.currencies  = currencies;
+    this.executor = executor;
     this.clock = clock;
   }
 
@@ -66,22 +85,13 @@ public class CurrencyConversionManager implements Managed {
 
   @Override
   public void start() throws Exception {
-    new Thread(() -> {
-      for (;;) {
-        try {
-          updateCacheIfNecessary();
-        } catch (Throwable t) {
-          logger.warn("Error updating currency conversions", t);
-        }
-
-        Util.sleep(15000);
+    executor.scheduleAtFixedRate(() -> {
+      try {
+        updateCacheIfNecessary();
+      } catch (Throwable t) {
+        logger.warn("Error updating currency conversions", t);
       }
-    }).start();
-  }
-
-  @Override
-  public void stop() throws Exception {
-
+    }, 0, 15, TimeUnit.SECONDS);
   }
 
   @VisibleForTesting
@@ -157,5 +167,19 @@ public class CurrencyConversionManager implements Managed {
     } else {
       return n;
     }
+  }
+
+  @VisibleForTesting
+  void setCachedFixerValues(final Map<String, BigDecimal> cachedFixerValues) {
+    this.cachedFixerValues = cachedFixerValues;
+  }
+
+  public Optional<BigDecimal> convertToUsd(final BigDecimal amount, final String currency) {
+    if ("USD".equalsIgnoreCase(currency)) {
+      return Optional.of(amount);
+    }
+
+    return Optional.ofNullable(cachedFixerValues.get(currency.toUpperCase(Locale.ROOT)))
+        .map(conversionRate -> amount.divide(conversionRate, 2, RoundingMode.HALF_EVEN));
   }
 }

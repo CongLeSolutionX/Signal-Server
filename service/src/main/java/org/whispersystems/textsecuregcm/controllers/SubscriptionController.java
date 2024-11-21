@@ -5,27 +5,45 @@
 
 package org.whispersystems.textsecuregcm.controllers;
 
-import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
-
-import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonInclude.Include;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
-import com.stripe.exception.StripeException;
+import com.google.common.net.HttpHeaders;
 import io.dropwizard.auth.Auth;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
+import io.swagger.v3.oas.annotations.ExternalDocumentation;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.DefaultValue;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.Response.Status;
 import java.math.BigDecimal;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -34,74 +52,47 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import javax.validation.Valid;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.DELETE;
-import javax.ws.rs.DefaultValue;
-import javax.ws.rs.ForbiddenException;
-import javax.ws.rs.GET;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.InternalServerErrorException;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.ProcessingException;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
-import org.signal.libsignal.zkgroup.InvalidInputException;
-import org.signal.libsignal.zkgroup.VerificationFailedException;
-import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialRequest;
+import javax.annotation.Nullable;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialResponse;
-import org.signal.libsignal.zkgroup.receipts.ServerZkReceiptOperations;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.backup.BackupManager;
 import org.whispersystems.textsecuregcm.badges.BadgeTranslator;
-import org.whispersystems.textsecuregcm.badges.LevelTranslator;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationConfiguration;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationCurrencyConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SubscriptionConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SubscriptionLevelConfiguration;
 import org.whispersystems.textsecuregcm.entities.Badge;
 import org.whispersystems.textsecuregcm.entities.PurchasableBadge;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.storage.IssuedReceiptsManager;
+import org.whispersystems.textsecuregcm.storage.PaymentTime;
+import org.whispersystems.textsecuregcm.storage.SubscriberCredentials;
+import org.whispersystems.textsecuregcm.storage.SubscriptionException;
 import org.whispersystems.textsecuregcm.storage.SubscriptionManager;
-import org.whispersystems.textsecuregcm.storage.SubscriptionManager.GetResult;
+import org.whispersystems.textsecuregcm.subscriptions.AppleAppStoreManager;
+import org.whispersystems.textsecuregcm.subscriptions.BankMandateTranslator;
+import org.whispersystems.textsecuregcm.subscriptions.BankTransferType;
 import org.whispersystems.textsecuregcm.subscriptions.BraintreeManager;
+import org.whispersystems.textsecuregcm.subscriptions.ChargeFailure;
+import org.whispersystems.textsecuregcm.subscriptions.CustomerAwareSubscriptionPaymentProcessor;
+import org.whispersystems.textsecuregcm.subscriptions.GooglePlayBillingManager;
 import org.whispersystems.textsecuregcm.subscriptions.PaymentMethod;
+import org.whispersystems.textsecuregcm.subscriptions.PaymentProvider;
 import org.whispersystems.textsecuregcm.subscriptions.ProcessorCustomer;
 import org.whispersystems.textsecuregcm.subscriptions.StripeManager;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionCurrencyUtil;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionProcessor;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionProcessorManager;
-import org.whispersystems.textsecuregcm.util.ExactlySize;
+import org.whispersystems.textsecuregcm.util.ExceptionUtils;
+import org.whispersystems.textsecuregcm.util.HeaderUtils;
+import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
+import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
+import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
+import org.whispersystems.websocket.auth.ReadOnly;
 
 @Path("/v1/subscription")
 @io.swagger.v3.oas.annotations.tags.Tag(name = "Subscriptions")
 public class SubscriptionController {
-
-  private static final Logger logger = LoggerFactory.getLogger(SubscriptionController.class);
 
   private final Clock clock;
   private final SubscriptionConfiguration subscriptionConfiguration;
@@ -109,17 +100,14 @@ public class SubscriptionController {
   private final SubscriptionManager subscriptionManager;
   private final StripeManager stripeManager;
   private final BraintreeManager braintreeManager;
-  private final ServerZkReceiptOperations zkReceiptOperations;
-  private final IssuedReceiptsManager issuedReceiptsManager;
+  private final GooglePlayBillingManager googlePlayBillingManager;
+  private final AppleAppStoreManager appleAppStoreManager;
   private final BadgeTranslator badgeTranslator;
-  private final LevelTranslator levelTranslator;
-  private final Map<String, CurrencyConfiguration> currencyConfiguration;
-
-  private static final String INVALID_ACCEPT_LANGUAGE_COUNTER_NAME = name(SubscriptionController.class,
-      "invalidAcceptLanguage");
-  private static final String RECEIPT_ISSUED_COUNTER_NAME = name(SubscriptionController.class, "receiptIssued");
-  private static final String PROCESSOR_TAG_NAME = "processor";
-  private static final String TYPE_TAG_NAME = "type";
+  private final BankMandateTranslator bankMandateTranslator;
+  static final String RECEIPT_ISSUED_COUNTER_NAME = MetricsUtil.name(SubscriptionController.class, "receiptIssued");
+  static final String PROCESSOR_TAG_NAME = "processor";
+  static final String TYPE_TAG_NAME = "type";
+  private static final String SUBSCRIPTION_TYPE_TAG_NAME = "subscriptionType";
 
   public SubscriptionController(
       @Nonnull Clock clock,
@@ -128,30 +116,24 @@ public class SubscriptionController {
       @Nonnull SubscriptionManager subscriptionManager,
       @Nonnull StripeManager stripeManager,
       @Nonnull BraintreeManager braintreeManager,
-      @Nonnull ServerZkReceiptOperations zkReceiptOperations,
-      @Nonnull IssuedReceiptsManager issuedReceiptsManager,
+      @Nonnull GooglePlayBillingManager googlePlayBillingManager,
+      @Nonnull AppleAppStoreManager appleAppStoreManager,
       @Nonnull BadgeTranslator badgeTranslator,
-      @Nonnull LevelTranslator levelTranslator) {
+      @Nonnull BankMandateTranslator bankMandateTranslator) {
+    this.subscriptionManager = subscriptionManager;
     this.clock = Objects.requireNonNull(clock);
     this.subscriptionConfiguration = Objects.requireNonNull(subscriptionConfiguration);
     this.oneTimeDonationConfiguration = Objects.requireNonNull(oneTimeDonationConfiguration);
-    this.subscriptionManager = Objects.requireNonNull(subscriptionManager);
     this.stripeManager = Objects.requireNonNull(stripeManager);
     this.braintreeManager = Objects.requireNonNull(braintreeManager);
-    this.zkReceiptOperations = Objects.requireNonNull(zkReceiptOperations);
-    this.issuedReceiptsManager = Objects.requireNonNull(issuedReceiptsManager);
+    this.googlePlayBillingManager = Objects.requireNonNull(googlePlayBillingManager);
+    this.appleAppStoreManager = appleAppStoreManager;
     this.badgeTranslator = Objects.requireNonNull(badgeTranslator);
-    this.levelTranslator = Objects.requireNonNull(levelTranslator);
-
-    this.currencyConfiguration = buildCurrencyConfiguration(this.oneTimeDonationConfiguration,
-        this.subscriptionConfiguration, List.of(stripeManager, braintreeManager));
+    this.bankMandateTranslator = Objects.requireNonNull(bankMandateTranslator);
   }
 
-  private static Map<String, CurrencyConfiguration> buildCurrencyConfiguration(
-      OneTimeDonationConfiguration oneTimeDonationConfiguration,
-      SubscriptionConfiguration subscriptionConfiguration,
-      List<SubscriptionProcessorManager> subscriptionProcessorManagers) {
-
+  private Map<String, CurrencyConfiguration> buildCurrencyConfiguration() {
+    final List<CustomerAwareSubscriptionPaymentProcessor> subscriptionPaymentProcessors = List.of(stripeManager, braintreeManager);
     return oneTimeDonationConfiguration.currencies()
         .entrySet().stream()
         .collect(Collectors.toMap(Entry::getKey, currencyAndConfig -> {
@@ -163,17 +145,17 @@ public class SubscriptionController {
               String.valueOf(oneTimeDonationConfiguration.gift().level()), List.of(currencyConfig.gift())
           );
 
-          final Map<String, BigDecimal> subscriptionLevelsToAmounts = subscriptionConfiguration.getLevels()
-              .entrySet().stream()
-              .filter(levelIdAndConfig -> levelIdAndConfig.getValue().getPrices().containsKey(currency))
-              .collect(Collectors.toMap(
-                  levelIdAndConfig -> String.valueOf(levelIdAndConfig.getKey()),
-                  levelIdAndConfig -> levelIdAndConfig.getValue().getPrices().get(currency).amount()));
+          final Function<Map<Long, ? extends SubscriptionLevelConfiguration>, Map<String, BigDecimal>> extractSubscriptionAmounts = levels ->
+              levels.entrySet().stream()
+                  .filter(levelIdAndConfig -> levelIdAndConfig.getValue().prices().containsKey(currency))
+                  .collect(Collectors.toMap(
+                      levelIdAndConfig -> String.valueOf(levelIdAndConfig.getKey()),
+                      levelIdAndConfig -> levelIdAndConfig.getValue().prices().get(currency).amount()));
 
           final List<String> supportedPaymentMethods = Arrays.stream(PaymentMethod.values())
-              .filter(paymentMethod -> subscriptionProcessorManagers.stream()
-                  .anyMatch(manager -> manager.getSupportedCurrencies().contains(currency)
-                      && manager.supportsPaymentMethod(paymentMethod)))
+              .filter(paymentMethod -> subscriptionPaymentProcessors.stream()
+                  .anyMatch(manager -> manager.supportsPaymentMethod(paymentMethod)
+                      && manager.getSupportedCurrenciesForPaymentMethod(paymentMethod).contains(currency)))
               .map(PaymentMethod::name)
               .collect(Collectors.toList());
 
@@ -181,63 +163,68 @@ public class SubscriptionController {
             throw new RuntimeException("Configuration has currency with no processor support: " + currency);
           }
 
-          return new CurrencyConfiguration(currencyConfig.minimum(), oneTimeLevelsToSuggestedAmounts,
-              subscriptionLevelsToAmounts, supportedPaymentMethods);
+          return new CurrencyConfiguration(
+              currencyConfig.minimum(),
+              oneTimeLevelsToSuggestedAmounts,
+              extractSubscriptionAmounts.apply(subscriptionConfiguration.getDonationLevels()),
+              extractSubscriptionAmounts.apply(subscriptionConfiguration.getBackupLevels()),
+              supportedPaymentMethods);
         }));
   }
 
   @VisibleForTesting
-  GetSubscriptionConfigurationResponse buildGetSubscriptionConfigurationResponse(List<Locale> acceptableLanguages) {
+  GetSubscriptionConfigurationResponse buildGetSubscriptionConfigurationResponse(
+      final List<Locale> acceptableLanguages) {
+    final Map<String, LevelConfiguration> donationLevels = new HashMap<>();
 
-    final Map<String, LevelConfiguration> levels = new HashMap<>();
-
-    subscriptionConfiguration.getLevels().forEach((levelId, levelConfig) -> {
+    subscriptionConfiguration.getDonationLevels().forEach((levelId, levelConfig) -> {
       final LevelConfiguration levelConfiguration = new LevelConfiguration(
-          levelTranslator.translate(acceptableLanguages, levelConfig.getBadge()),
-          badgeTranslator.translate(acceptableLanguages, levelConfig.getBadge()));
-      levels.put(String.valueOf(levelId), levelConfiguration);
+          "" /* deprecated and unused */,
+          badgeTranslator.translate(acceptableLanguages, levelConfig.badge()));
+      donationLevels.put(String.valueOf(levelId), levelConfiguration);
     });
 
     final Badge boostBadge = badgeTranslator.translate(acceptableLanguages,
         oneTimeDonationConfiguration.boost().badge());
-    levels.put(String.valueOf(oneTimeDonationConfiguration.boost().level()),
+    donationLevels.put(String.valueOf(oneTimeDonationConfiguration.boost().level()),
         new LevelConfiguration(
-            boostBadge.getName(),
+            "" /* deprecated and unused */,
             // NB: the one-time badges are PurchasableBadge, which has a `duration` field
             new PurchasableBadge(
                 boostBadge,
                 oneTimeDonationConfiguration.boost().expiration())));
 
     final Badge giftBadge = badgeTranslator.translate(acceptableLanguages, oneTimeDonationConfiguration.gift().badge());
-    levels.put(String.valueOf(oneTimeDonationConfiguration.gift().level()),
+    donationLevels.put(String.valueOf(oneTimeDonationConfiguration.gift().level()),
         new LevelConfiguration(
-            giftBadge.getName(),
+            "" /* deprecated and unused */,
             new PurchasableBadge(
                 giftBadge,
                 oneTimeDonationConfiguration.gift().expiration())));
 
-    return new GetSubscriptionConfigurationResponse(currencyConfiguration, levels);
+    final Map<String, BackupLevelConfiguration> backupLevels = subscriptionConfiguration.getBackupLevels()
+        .entrySet().stream()
+        .collect(Collectors.toMap(
+            e -> String.valueOf(e.getKey()),
+            e -> new BackupLevelConfiguration(
+                BackupManager.MAX_TOTAL_BACKUP_MEDIA_BYTES,
+                e.getValue().playProductId(),
+                e.getValue().mediaTtl().toDays())));
+
+    return new GetSubscriptionConfigurationResponse(buildCurrencyConfiguration(), donationLevels,
+        new BackupConfiguration(backupLevels, subscriptionConfiguration.getbackupFreeTierMediaDuration().toDays()),
+        oneTimeDonationConfiguration.sepaMaximumEuros());
   }
 
   @DELETE
   @Path("/{subscriberId}")
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> deleteSubscriber(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
-      @PathParam("subscriberId") String subscriberId) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenCompose(getResult -> {
-          if (getResult == GetResult.NOT_STORED || getResult == GetResult.PASSWORD_MISMATCH) {
-            throw new NotFoundException();
-          }
-          return getResult.record.getProcessorCustomer()
-                  .map(processorCustomer -> getManagerForProcessor(processorCustomer.processor()).cancelAllActiveSubscriptions(processorCustomer.customerId()))
-              // a missing customer ID is OK; it means the subscriber never started to add a payment method
-              .orElseGet(() -> CompletableFuture.completedFuture(null));
-        })
-        .thenCompose(unused -> subscriptionManager.canceledAt(requestData.subscriberUser, requestData.now))
-        .thenApply(unused -> Response.ok().build());
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    return subscriptionManager.deleteSubscriber(subscriberCredentials).thenApply(unused -> Response.ok().build());
   }
 
   @PUT
@@ -245,32 +232,14 @@ public class SubscriptionController {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> updateSubscriber(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
-      @PathParam("subscriberId") String subscriberId) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenCompose(getResult -> {
-          if (getResult == GetResult.PASSWORD_MISMATCH) {
-            throw new ForbiddenException("subscriberId mismatch");
-          } else if (getResult == GetResult.NOT_STORED) {
-            // create a customer and write it to ddb
-            return subscriptionManager.create(requestData.subscriberUser, requestData.hmac, requestData.now)
-                .thenApply(updatedRecord -> {
-                  if (updatedRecord == null) {
-                    throw new ForbiddenException();
-                  }
-                  return updatedRecord;
-                });
-          } else {
-            // already exists so just touch access time and return
-            return subscriptionManager.accessedAt(requestData.subscriberUser, requestData.now)
-                .thenApply(unused -> getResult.record);
-          }
-        })
-        .thenApply(record -> Response.ok().build());
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    return subscriptionManager.updateSubscriber(subscriberCredentials).thenApply(record -> Response.ok().build());
   }
 
-  record CreatePaymentMethodResponse(String clientSecret, SubscriptionProcessor processor) {
+  record CreatePaymentMethodResponse(String clientSecret, PaymentProvider processor) {
 
   }
 
@@ -279,133 +248,74 @@ public class SubscriptionController {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> createPaymentMethod(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
       @PathParam("subscriberId") String subscriberId,
-      @QueryParam("type") @DefaultValue("CARD") PaymentMethod paymentMethodType) {
+      @QueryParam("type") @DefaultValue("CARD") PaymentMethod paymentMethodType,
+      @HeaderParam(HttpHeaders.USER_AGENT) @Nullable final String userAgentString) throws SubscriptionException {
 
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
 
-    final SubscriptionProcessorManager subscriptionProcessorManager = getManagerForPaymentMethod(paymentMethodType);
+    final CustomerAwareSubscriptionPaymentProcessor customerAwareSubscriptionPaymentProcessor = switch (paymentMethodType) {
+      // Today, we always choose stripe to process non-paypal payment types, however we could use braintree to process
+      // other types (like CARD) in the future.
+      case CARD, SEPA_DEBIT, IDEAL -> stripeManager;
+      case GOOGLE_PLAY_BILLING, APPLE_APP_STORE ->
+          throw new BadRequestException("cannot create payment methods with payment type " + paymentMethodType);
+      case PAYPAL -> throw new BadRequestException("The PAYPAL payment type must use create_payment_method/paypal");
+      case UNKNOWN -> throw new BadRequestException("Invalid payment method");
+    };
 
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> {
-          final CompletableFuture<SubscriptionManager.Record> updatedRecordFuture =
-              record.getProcessorCustomer()
-                  .map(ProcessorCustomer::processor)
-                  .map(processor -> {
-                    if (processor != subscriptionProcessorManager.getProcessor()) {
-                      throw new ClientErrorException("existing processor does not match", Status.CONFLICT);
-                    }
-
-                    return CompletableFuture.completedFuture(record);
-                  })
-                  .orElseGet(() -> subscriptionProcessorManager.createCustomer(requestData.subscriberUser)
-                      .thenApply(ProcessorCustomer::customerId)
-                      .thenCompose(customerId -> subscriptionManager.setProcessorAndCustomerId(record,
-                          new ProcessorCustomer(customerId, subscriptionProcessorManager.getProcessor()),
-                          Instant.now())));
-
-          return updatedRecordFuture.thenCompose(
-              updatedRecord -> {
-                final String customerId = updatedRecord.getProcessorCustomer()
-                    .filter(pc -> pc.processor().equals(subscriptionProcessorManager.getProcessor()))
-                    .orElseThrow(() -> new InternalServerErrorException("record should not be missing customer"))
-                    .customerId();
-                return subscriptionProcessorManager.createPaymentMethodSetupToken(customerId);
-              });
-        })
-        .thenApply(
-            token -> Response.ok(new CreatePaymentMethodResponse(token, subscriptionProcessorManager.getProcessor()))
-                .build());
+    return subscriptionManager.addPaymentMethodToCustomer(
+            subscriberCredentials,
+            customerAwareSubscriptionPaymentProcessor,
+            getClientPlatform(userAgentString),
+            CustomerAwareSubscriptionPaymentProcessor::createPaymentMethodSetupToken)
+        .thenApply(token ->
+            Response.ok(new CreatePaymentMethodResponse(token, customerAwareSubscriptionPaymentProcessor.getProvider())).build());
   }
 
-  public record CreatePayPalBillingAgreementRequest(@NotBlank String returnUrl, @NotBlank String cancelUrl) {
+  public record CreatePayPalBillingAgreementRequest(@NotBlank String returnUrl, @NotBlank String cancelUrl) {}
 
-  }
-
-  public record CreatePayPalBillingAgreementResponse(@NotBlank String approvalUrl, @NotBlank String token) {
-
-  }
+  public record CreatePayPalBillingAgreementResponse(@NotBlank String approvalUrl, @NotBlank String token) {}
 
   @POST
   @Path("/{subscriberId}/create_payment_method/paypal")
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> createPayPalPaymentMethod(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
       @PathParam("subscriberId") String subscriberId,
       @NotNull @Valid CreatePayPalBillingAgreementRequest request,
-      @Context ContainerRequestContext containerRequestContext) {
+      @Context ContainerRequestContext containerRequestContext,
+      @HeaderParam(HttpHeaders.USER_AGENT) @Nullable final String userAgentString) throws SubscriptionException {
 
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
+    final SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    final Locale locale = HeaderUtils.getAcceptableLanguagesForRequest(containerRequestContext).stream()
+        .filter(l -> !"*".equals(l.getLanguage()))
+        .findFirst()
+        .orElse(Locale.US);
 
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> {
-
-          final CompletableFuture<SubscriptionManager.Record> updatedRecordFuture =
-              record.getProcessorCustomer()
-                  .map(ProcessorCustomer::processor)
-                  .map(processor -> {
-                    if (processor != braintreeManager.getProcessor()) {
-                      throw new ClientErrorException("existing processor does not match", Status.CONFLICT);
-                    }
-                    return CompletableFuture.completedFuture(record);
-                  })
-                  .orElseGet(() -> braintreeManager.createCustomer(requestData.subscriberUser)
-                      .thenApply(ProcessorCustomer::customerId)
-                      .thenCompose(customerId -> subscriptionManager.setProcessorAndCustomerId(record,
-                          new ProcessorCustomer(customerId, braintreeManager.getProcessor()),
-                          Instant.now())));
-
-          return updatedRecordFuture.thenCompose(
-              updatedRecord -> {
-                final Locale locale = getAcceptableLanguagesForRequest(containerRequestContext).stream()
-                    .filter(l -> !"*".equals(l.getLanguage()))
-                    .findFirst()
-                    .orElse(Locale.US);
-
-                return braintreeManager.createPayPalBillingAgreement(request.returnUrl, request.cancelUrl,
-                    locale.toLanguageTag());
-              });
-        })
-        .thenApply(
-            billingAgreementApprovalDetails -> Response.ok(
-                    new CreatePayPalBillingAgreementResponse(billingAgreementApprovalDetails.approvalUrl(),
-                        billingAgreementApprovalDetails.billingAgreementToken()))
-                .build());
+    return subscriptionManager.addPaymentMethodToCustomer(
+            subscriberCredentials,
+            braintreeManager,
+            getClientPlatform(userAgentString),
+            (mgr, customerId) ->
+                mgr.createPayPalBillingAgreement(request.returnUrl, request.cancelUrl, locale.toLanguageTag()))
+        .thenApply(billingAgreementApprovalDetails -> Response.ok(
+                new CreatePayPalBillingAgreementResponse(
+                    billingAgreementApprovalDetails.approvalUrl(),
+                    billingAgreementApprovalDetails.billingAgreementToken()))
+            .build());
   }
 
-  private SubscriptionProcessorManager getManagerForPaymentMethod(PaymentMethod paymentMethod) {
-    return switch (paymentMethod) {
-      case CARD -> stripeManager;
-      case PAYPAL -> braintreeManager;
-    };
-  }
-
-  private SubscriptionProcessorManager getManagerForProcessor(SubscriptionProcessor processor) {
+  private CustomerAwareSubscriptionPaymentProcessor getCustomerAwareProcessor(PaymentProvider processor) {
     return switch (processor) {
       case STRIPE -> stripeManager;
       case BRAINTREE -> braintreeManager;
+      case GOOGLE_PLAY_BILLING, APPLE_APP_STORE -> throw new BadRequestException("Operation cannot be performed with the " + processor + " payment provider");
     };
-  }
-
-  @POST
-  @Path("/{subscriberId}/default_payment_method/{paymentMethodId}")
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_JSON)
-  @Deprecated // use /{subscriberId}/default_payment_method/{processor}/{paymentMethodId}
-  public CompletableFuture<Response> setDefaultPaymentMethod(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
-      @PathParam("subscriberId") String subscriberId,
-      @PathParam("paymentMethodId") @NotEmpty String paymentMethodId) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> stripeManager.setDefaultPaymentMethodForCustomer(
-            record.getProcessorCustomer().orElseThrow().customerId(), paymentMethodId, record.subscriptionId))
-        .thenApply(customer -> Response.ok().build());
   }
 
   @POST
@@ -413,80 +323,30 @@ public class SubscriptionController {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> setDefaultPaymentMethodWithProcessor(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
       @PathParam("subscriberId") String subscriberId,
-      @PathParam("processor") SubscriptionProcessor processor,
-      @PathParam("paymentMethodToken") @NotEmpty String paymentMethodToken) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
+      @PathParam("processor") PaymentProvider processor,
+      @PathParam("paymentMethodToken") @NotEmpty String paymentMethodToken) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
 
-    final SubscriptionProcessorManager manager = getManagerForProcessor(processor);
+    final CustomerAwareSubscriptionPaymentProcessor manager = getCustomerAwareProcessor(processor);
 
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> record.getProcessorCustomer()
-            .map(processorCustomer -> manager.setDefaultPaymentMethodForCustomer(processorCustomer.customerId(),
-                paymentMethodToken, record.subscriptionId))
-            .orElseThrow(() ->
-                // a missing customer ID indicates the client made requests out of order,
-                // and needs to call create_payment_method to create a customer for the given payment method
-                new ClientErrorException(Status.CONFLICT)))
-        .thenApply(customer -> Response.ok().build());
-  }
-  public static class SetSubscriptionLevelSuccessResponse {
-
-    private final long level;
-
-    @JsonCreator
-    public SetSubscriptionLevelSuccessResponse(
-        @JsonProperty("level") long level) {
-      this.level = level;
-    }
-
-    public long getLevel() {
-      return level;
-    }
+    return setDefaultPaymentMethod(manager, paymentMethodToken, subscriberCredentials);
   }
 
-  public static class SetSubscriptionLevelErrorResponse {
+  public record SetSubscriptionLevelSuccessResponse(long level) {
+  }
 
-    public static class Error {
+  public record SetSubscriptionLevelErrorResponse(List<Error> errors) {
+
+    public record Error(SetSubscriptionLevelErrorResponse.Error.Type type, String message) {
 
       public enum Type {
         UNSUPPORTED_LEVEL,
         UNSUPPORTED_CURRENCY,
         PAYMENT_REQUIRES_ACTION,
       }
-
-      private final Type type;
-      private final String message;
-
-      @JsonCreator
-      public Error(
-          @JsonProperty("type") Type type,
-          @JsonProperty("message") String message) {
-        this.type = type;
-        this.message = message;
-      }
-
-      public Type getType() {
-        return type;
-      }
-
-      public String getMessage() {
-        return message;
-      }
-    }
-
-    private final List<Error> errors;
-
-    @JsonCreator
-    public SetSubscriptionLevelErrorResponse(
-        @JsonProperty("errors") List<Error> errors) {
-      this.errors = errors;
-    }
-
-    public List<Error> getErrors() {
-      return errors;
     }
   }
 
@@ -495,16 +355,15 @@ public class SubscriptionController {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> setSubscriptionLevel(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
       @PathParam("subscriberId") String subscriberId,
       @PathParam("level") long level,
       @PathParam("currency") String currency,
-      @PathParam("idempotencyKey") String idempotencyKey) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
+      @PathParam("idempotencyKey") String idempotencyKey) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    return subscriptionManager.getSubscriber(subscriberCredentials)
         .thenCompose(record -> {
-
           final ProcessorCustomer processorCustomer = record.getProcessorCustomer()
               .orElseThrow(() ->
                   // a missing customer ID indicates the client made requests out of order,
@@ -514,708 +373,277 @@ public class SubscriptionController {
           final String subscriptionTemplateId = getSubscriptionTemplateId(level, currency,
               processorCustomer.processor());
 
-          final SubscriptionProcessorManager manager = getManagerForProcessor(processorCustomer.processor());
-
-          return Optional.ofNullable(record.subscriptionId).map(subId -> {
-            // we already have a subscription in our records so let's check the level and currency,
-            // and only change it if needed
-            return manager.getSubscription(subId).thenCompose(
-                subscription -> manager.getLevelAndCurrencyForSubscription(subscription)
-                    .thenCompose(existingLevelAndCurrency -> {
-                      if (existingLevelAndCurrency.equals(new SubscriptionProcessorManager.LevelAndCurrency(level,
-                          currency.toLowerCase(Locale.ROOT)))) {
-                        return CompletableFuture.completedFuture(subscription);
-                      }
-                      return manager.updateSubscription(
-                              subscription, subscriptionTemplateId, level, idempotencyKey)
-                          .thenCompose(updatedSubscription ->
-                              subscriptionManager.subscriptionLevelChanged(requestData.subscriberUser,
-                                      requestData.now,
-                                      level, updatedSubscription.id())
-                                  .thenApply(unused -> updatedSubscription));
-                    }));
-          }).orElseGet(() -> {
-            long lastSubscriptionCreatedAt =
-                record.subscriptionCreatedAt != null ? record.subscriptionCreatedAt.getEpochSecond() : 0;
-
-            // we don't have a subscription yet so create it and then record the subscription id
-            return manager.createSubscription(processorCustomer.customerId(),
-                    subscriptionTemplateId,
-                    level,
-                    lastSubscriptionCreatedAt)
-                .exceptionally(e -> {
-                  if (e.getCause() instanceof StripeException stripeException
-                      && stripeException.getCode().equals("subscription_payment_intent_requires_action")) {
-                    throw new BadRequestException(Response.status(Status.BAD_REQUEST)
-                        .entity(new SetSubscriptionLevelErrorResponse(List.of(
-                            new SetSubscriptionLevelErrorResponse.Error(
-                                SetSubscriptionLevelErrorResponse.Error.Type.PAYMENT_REQUIRES_ACTION, null
-                            )
-                        ))).build());
-                  }
-                  if (e instanceof RuntimeException re) {
-                    throw re;
-                  }
-
-                  throw new CompletionException(e);
-                })
-                .thenCompose(subscription -> subscriptionManager.subscriptionCreated(
-                        requestData.subscriberUser, subscription.id(), requestData.now, level)
-                    .thenApply(unused -> subscription));
-          });
+          final CustomerAwareSubscriptionPaymentProcessor manager = getCustomerAwareProcessor(processorCustomer.processor());
+          return subscriptionManager.updateSubscriptionLevelForCustomer(subscriberCredentials, record, manager, level,
+              currency, idempotencyKey, subscriptionTemplateId, this::subscriptionsAreSameType);
         })
-            .thenApply(unused -> Response.ok(new SetSubscriptionLevelSuccessResponse(level)).build());
+        .exceptionally(ExceptionUtils.exceptionallyHandler(SubscriptionException.InvalidLevel.class, e -> {
+          throw new BadRequestException(Response.status(Response.Status.BAD_REQUEST)
+              .entity(new SubscriptionController.SetSubscriptionLevelErrorResponse(List.of(
+                  new SubscriptionController.SetSubscriptionLevelErrorResponse.Error(
+                      SubscriptionController.SetSubscriptionLevelErrorResponse.Error.Type.UNSUPPORTED_LEVEL,
+                      null))))
+              .build());
+        }))
+        .exceptionally(ExceptionUtils.exceptionallyHandler(SubscriptionException.PaymentRequiresAction.class, e -> {
+          throw new BadRequestException(Response.status(Response.Status.BAD_REQUEST)
+              .entity(new SetSubscriptionLevelErrorResponse(List.of(new SetSubscriptionLevelErrorResponse.Error(
+                  SetSubscriptionLevelErrorResponse.Error.Type.PAYMENT_REQUIRES_ACTION, null))))
+              .build());
+        }))
+        .thenApply(unused -> Response.ok(new SetSubscriptionLevelSuccessResponse(level)).build());
   }
 
-  public static class GetLevelsResponse {
-
-    public static class Level {
-
-      private final String name;
-      private final Badge badge;
-      private final Map<String, BigDecimal> currencies;
-
-      @JsonCreator
-      public Level(
-          @JsonProperty("name") String name,
-          @JsonProperty("badge") Badge badge,
-          @JsonProperty("currencies") Map<String, BigDecimal> currencies) {
-        this.name = name;
-        this.badge = badge;
-        this.currencies = currencies;
-      }
-
-      public String getName() {
-        return name;
-      }
-
-      public Badge getBadge() {
-        return badge;
-      }
-
-      public Map<String, BigDecimal> getCurrencies() {
-        return currencies;
-      }
-    }
-
-    private final Map<Long, Level> levels;
-
-    @JsonCreator
-    public GetLevelsResponse(
-        @JsonProperty("levels") Map<Long, Level> levels) {
-      this.levels = levels;
-    }
-
-    public Map<Long, Level> getLevels() {
-      return levels;
-    }
+  public boolean subscriptionsAreSameType(long level1, long level2) {
+    return subscriptionConfiguration.getSubscriptionLevel(level1).type()
+        == subscriptionConfiguration.getSubscriptionLevel(level2).type();
   }
 
-  /**
-   * Comprehensive configuration for subscriptions and one-time donations
-   *
-   * @param currencies map of lower-cased ISO 3 currency codes to minimums and level-specific scalar amounts
-   * @param levels     map of numeric level IDs to level-specific configuration
-   */
-  public record GetSubscriptionConfigurationResponse(Map<String, CurrencyConfiguration> currencies,
-                                                     Map<String, LevelConfiguration> levels) {
+  @POST
+  @Path("/{subscriberId}/appstore/{originalTransactionId}")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(summary = "Set app store subscription", description = """
+  Set an originalTransactionId that represents an IAP subscription made with the app store.
+  
+  To set up an app store subscription:
+  1. Create a subscriber with `PUT subscriptions/{subscriberId}` (you must regularly refresh this subscriber)
+  2. [Create a subscription](https://developer.apple.com/documentation/storekit/in-app_purchase/) with the App Store
+     directly via StoreKit and obtain a originalTransactionId.
+  3. `POST` the purchaseToken here
+  4. Obtain a receipt at `POST /v1/subscription/{subscriberId}/receipt_credentials` which can then be used to obtain the
+     entitlement
+  """)
+  @ApiResponse(responseCode = "200", description = "The originalTransactionId was successfully validated")
+  @ApiResponse(responseCode = "402", description = "The subscription transaction is incomplete or invalid")
+  @ApiResponse(responseCode = "403", description = "subscriberId authentication failure OR account authentication is present")
+  @ApiResponse(responseCode = "404", description = "No such subscriberId exists or subscriberId is malformed or the specified transaction does not exist")
+  @ApiResponse(responseCode = "409", description = "subscriberId is already linked to a processor that does not support appstore payments. Delete this subscriberId and use a new one.")
+  @ApiResponse(responseCode = "429", description = "Rate limit exceeded.")
+  public CompletableFuture<SetSubscriptionLevelSuccessResponse> setAppStoreSubscription(
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId,
+      @PathParam("originalTransactionId") String originalTransactionId) throws SubscriptionException {
+    final SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
 
+    return subscriptionManager
+        .updateAppStoreTransactionId(subscriberCredentials, appleAppStoreManager, originalTransactionId)
+        .thenApply(SetSubscriptionLevelSuccessResponse::new);
   }
 
-  /**
-   * Configuration for a currency - use to present appropriate client interfaces
-   *
-   * @param minimum                 the minimum amount that may be submitted for a one-time donation in the currency
-   * @param oneTime                 map of numeric one-time donation level IDs to the list of default amounts to be
-   *                                presented
-   * @param subscription            map of numeric subscription level IDs to the amount charged for that level
-   * @param supportedPaymentMethods the payment methods that support the given currency
-   */
-  public record CurrencyConfiguration(BigDecimal minimum, Map<String, List<BigDecimal>> oneTime,
-                                      Map<String, BigDecimal> subscription,
-                                      List<String> supportedPaymentMethods) {
 
+  @POST
+  @Path("/{subscriberId}/playbilling/{purchaseToken}")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @Operation(summary = "Set a google play billing purchase token", description = """
+  Set a purchaseToken that represents an IAP subscription made with Google Play Billing.
+
+  To set up a subscription with Google Play Billing:
+  1. Create a subscriber with `PUT subscriptions/{subscriberId}` (you must regularly refresh this subscriber)
+  2. [Create a subscription](https://developer.android.com/google/play/billing/integrate) with Google Play Billing
+     directly and obtain a purchaseToken. Do not [acknowledge](https://developer.android.com/google/play/billing/integrate#subscriptions)
+     the purchaseToken.
+  3. `POST` the purchaseToken here
+  4. Obtain a receipt at `POST /v1/subscription/{subscriberId}/receipt_credentials` which can then be used to obtain the
+     entitlement
+
+  After calling this method, the payment is confirmed. Callers must durably store their subscriberId before calling
+  this method to ensure their payment is tracked.
+
+  Once a purchaseToken to is posted to a subscriberId, the same subscriberId must not be used with another payment
+  method. A different playbilling purchaseToken can be posted to the same subscriberId, in this case the subscription
+  associated with the old purchaseToken will be cancelled.
+  """)
+  @ApiResponse(responseCode = "200", description = "The purchaseToken was validated and acknowledged")
+  @ApiResponse(responseCode = "402", description = "The purchaseToken payment is incomplete or invalid")
+  @ApiResponse(responseCode = "403", description = "subscriberId authentication failure OR account authentication is present")
+  @ApiResponse(responseCode = "404", description = "No such subscriberId exists or subscriberId is malformed or the purchaseToken does not exist")
+  @ApiResponse(responseCode = "409", description = "subscriberId is already linked to a processor that does not support Play Billing. Delete this subscriberId and use a new one.")
+  public CompletableFuture<SetSubscriptionLevelSuccessResponse> setPlayStoreSubscription(
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId,
+      @PathParam("purchaseToken") String purchaseToken) throws SubscriptionException {
+    final SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+
+    return subscriptionManager
+        .updatePlayBillingPurchaseToken(subscriberCredentials, googlePlayBillingManager, purchaseToken)
+        .thenApply(SetSubscriptionLevelSuccessResponse::new);
   }
 
-  /**
-   * Configuration for a donation level - use to present appropriate client interfaces
-   *
-   * @param name  the localized name for the level
-   * @param badge the displayable badge associated with the level
-   */
-  public record LevelConfiguration(String name, Badge badge) {
+  @Schema(description = """
+      Comprehensive configuration for donation subscriptions, backup subscriptions, gift subscriptions, and one-time
+      donations pricing information for all levels are included in currencies. All levels that have an associated
+      badge are included in levels.  All levels that correspond to a backup payment tier are included in
+      backupLevels.""")
+  public record GetSubscriptionConfigurationResponse(
+      @Schema(description = "A map of lower-cased ISO 3 currency codes to minimums and level-specific scalar amounts")
+      Map<String, CurrencyConfiguration> currencies,
+      @Schema(description = "A map of numeric donation level IDs to level-specific badge configuration")
+      Map<String, LevelConfiguration> levels,
+      @Schema(description = "Backup specific configuration")
+      BackupConfiguration backup,
+      @Schema(description = "The maximum value of a one-time donation SEPA transaction")
+      BigDecimal sepaMaximumEuros) {}
 
-  }
+  @Schema(description = "Configuration for a currency - use to present appropriate client interfaces")
+  public record CurrencyConfiguration(
+      @Schema(description = "The minimum amount that may be submitted for a one-time donation in the currency")
+      BigDecimal minimum,
+      @Schema(description = "A map of numeric one-time donation level IDs to the list of default amounts to be presented")
+      Map<String, List<BigDecimal>> oneTime,
+      @Schema(description = "A map of numeric subscription level IDs to the amount charged for that level")
+      Map<String, BigDecimal> subscription,
+      @Schema(description = "A map of numeric backup level IDs to the amount charged for that level")
+      Map<String, BigDecimal> backupSubscription,
+      @Schema(description = "The payment methods that support the given currency")
+      List<String> supportedPaymentMethods) {}
+
+  @Schema(description = "Configuration for a donation level - use to present appropriate client interfaces")
+  public record LevelConfiguration(
+      @Deprecated(forRemoval = true) // may be removed after 2025-01-28
+      @Schema(description = "The localized name for the level")
+      String name,
+      @Schema(description = "The displayable badge associated with the level")
+      Badge badge) {}
+
+  public record BackupConfiguration(
+      @Schema(description = "A map of numeric backup level IDs to level-specific backup configuration")
+      Map<String, BackupLevelConfiguration> levels,
+      @Schema(description = "The number of days of media a free tier backup user gets")
+      long freeTierMediaDays) {}
+
+  @Schema(description = "Configuration for a backup level - use to present appropriate client interfaces")
+  public record BackupLevelConfiguration(
+      @Schema(description = "The amount of media storage in bytes that a paying subscriber may store")
+      long storageAllowanceBytes,
+      @Schema(description = "The play billing productID associated with this backup level")
+      String playProductId,
+      @Schema(description = "The duration, in days, for which your backed up media is retained on the server after you stop refreshing with a paid credential")
+      long mediaTtlDays) {}
 
   @GET
   @Path("/configuration")
   @Produces(MediaType.APPLICATION_JSON)
+  @Operation(
+      summary = "Subscription configuration ",
+      description = """
+          Returns all configuration for badges, donation subscriptions, backup subscriptions, and one-time donation (
+          "boost" and "gift") minimum and suggested amounts.""")
+  @ApiResponse(responseCode = "200", content = @Content(schema = @Schema(implementation = GetSubscriptionConfigurationResponse.class)))
   public CompletableFuture<Response> getConfiguration(@Context ContainerRequestContext containerRequestContext) {
     return CompletableFuture.supplyAsync(() -> {
-      List<Locale> acceptableLanguages = getAcceptableLanguagesForRequest(containerRequestContext);
+      List<Locale> acceptableLanguages = HeaderUtils.getAcceptableLanguagesForRequest(containerRequestContext);
       return Response.ok(buildGetSubscriptionConfigurationResponse(acceptableLanguages)).build();
     });
   }
 
   @GET
-  @Path("/levels")
+  @Path("/bank_mandate/{bankTransferType}")
   @Produces(MediaType.APPLICATION_JSON)
-  @Deprecated // use /configuration
-  public CompletableFuture<Response> getLevels(@Context ContainerRequestContext containerRequestContext) {
+  public CompletableFuture<Response> getBankMandate(final @Context ContainerRequestContext containerRequestContext,
+      final @PathParam("bankTransferType") BankTransferType bankTransferType) {
     return CompletableFuture.supplyAsync(() -> {
-      List<Locale> acceptableLanguages = getAcceptableLanguagesForRequest(containerRequestContext);
-      GetLevelsResponse getLevelsResponse = new GetLevelsResponse(
-          subscriptionConfiguration.getLevels().entrySet().stream().collect(Collectors.toMap(Entry::getKey,
-              entry -> new GetLevelsResponse.Level(
-                  levelTranslator.translate(acceptableLanguages, entry.getValue().getBadge()),
-                  badgeTranslator.translate(acceptableLanguages, entry.getValue().getBadge()),
-                  entry.getValue().getPrices().entrySet().stream().collect(
-                      Collectors.toMap(levelEntry -> levelEntry.getKey().toUpperCase(Locale.ROOT),
-                          levelEntry -> levelEntry.getValue().amount()))))));
-      return Response.ok(getLevelsResponse).build();
+      List<Locale> acceptableLanguages = HeaderUtils.getAcceptableLanguagesForRequest(containerRequestContext);
+      return Response.ok(new GetBankMandateResponse(
+          bankMandateTranslator.translate(acceptableLanguages, bankTransferType))).build();
     });
   }
 
-  public static class GetBoostBadgesResponse {
-    public static class Level {
-      private final PurchasableBadge badge;
+  public record GetBankMandateResponse(String mandate) {}
 
-      @JsonCreator
-      public Level(
-          @JsonProperty("badge") PurchasableBadge badge) {
-        this.badge = badge;
-      }
+  public record GetSubscriptionInformationResponse(
+      @Schema(description = "Information about the subscription, or null if no subscription is present")
+      SubscriptionController.GetSubscriptionInformationResponse.Subscription subscription,
+      @Schema(description = "May be omitted entirely if no charge failure is detected")
+      @JsonInclude(Include.NON_NULL) ChargeFailure chargeFailure) {
 
-      public PurchasableBadge getBadge() {
-        return badge;
-      }
-    }
+    public record Subscription(
+        @Schema(description = "The subscription level")
+        long level,
 
-    private final Map<Long, Level> levels;
+        @Schema(
+            description = "If present, UNIX Epoch Timestamp in seconds, can be used to calculate next billing date.",
+            externalDocs = @ExternalDocumentation(description = "Calculate next billing date", url = "https://stripe.com/docs/billing/subscriptions/billing-cycle"))
+        Instant billingCycleAnchor,
 
-    @JsonCreator
-    public GetBoostBadgesResponse(
-        @JsonProperty("levels") Map<Long, Level> levels) {
-      this.levels = Objects.requireNonNull(levels);
-    }
+        @Schema(description = "UNIX Epoch Timestamp in seconds, when the current subscription period ends")
+        Instant endOfCurrentPeriod,
 
-    public Map<Long, Level> getLevels() {
-      return levels;
-    }
-  }
+        @Schema(description = "Whether there is a currently active subscription")
+        boolean active,
 
-  @GET
-  @Path("/boost/badges")
-  @Produces(MediaType.APPLICATION_JSON)
-  @Deprecated // use /configuration
-  public CompletableFuture<Response> getBoostBadges(@Context ContainerRequestContext containerRequestContext) {
-    return CompletableFuture.supplyAsync(() -> {
-      long boostLevel = oneTimeDonationConfiguration.boost().level();
-      String boostBadge = oneTimeDonationConfiguration.boost().badge();
-      long giftLevel = oneTimeDonationConfiguration.gift().level();
-      String giftBadge = oneTimeDonationConfiguration.gift().badge();
-      List<Locale> acceptableLanguages = getAcceptableLanguagesForRequest(containerRequestContext);
-      GetBoostBadgesResponse getBoostBadgesResponse = new GetBoostBadgesResponse(Map.of(
-          boostLevel, new GetBoostBadgesResponse.Level(
-              new PurchasableBadge(badgeTranslator.translate(acceptableLanguages, boostBadge),
-                  oneTimeDonationConfiguration.boost().expiration())),
-          giftLevel, new GetBoostBadgesResponse.Level(
-              new PurchasableBadge(badgeTranslator.translate(acceptableLanguages, giftBadge),
-                  oneTimeDonationConfiguration.gift().expiration()))));
-      return Response.ok(getBoostBadgesResponse).build();
-    });
-  }
+        @Schema(description = "If true, an active subscription will not auto-renew at the end of the current period")
+        boolean cancelAtPeriodEnd,
 
-  @GET
-  @Path("/boost/amounts")
-  @Produces(MediaType.APPLICATION_JSON)
-  @Deprecated // use /configuration
-  public CompletableFuture<Response> getBoostAmounts() {
-    return CompletableFuture.supplyAsync(() -> Response.ok(
-            oneTimeDonationConfiguration.currencies().entrySet().stream().collect(
-                Collectors.toMap(entry -> entry.getKey().toUpperCase(Locale.ROOT), entry -> entry.getValue().boosts())))
-        .build());
-  }
+        @Schema(description = "A three-letter ISO 4217 currency code for currency used in the subscription")
+        String currency,
 
-  @GET
-  @Path("/boost/amounts/gift")
-  @Produces(MediaType.APPLICATION_JSON)
-  @Deprecated // use /configuration
-  public CompletableFuture<Response> getGiftAmounts() {
-    return CompletableFuture.supplyAsync(() -> Response.ok(
-            oneTimeDonationConfiguration.currencies().entrySet().stream().collect(
-                Collectors.toMap(entry -> entry.getKey().toUpperCase(Locale.ROOT), entry -> entry.getValue().gift())))
-        .build());
-  }
+        @Schema(
+            description = "The amount paid for the subscription in the currency's smallest unit",
+            externalDocs = @ExternalDocumentation(description = "Stripe Currencies", url = "https://docs.stripe.com/currencies"))
+        BigDecimal amount,
 
-  public static class CreateBoostRequest {
+        @Schema(
+            description = "The subscription's status, mapped to Stripe's statuses. trialing will never be returned",
+            externalDocs = @ExternalDocumentation(description = "Stripe subscription statuses", url = "https://docs.stripe.com/billing/subscriptions/overview#subscription-statuses"))
+        String status,
 
-    @NotEmpty
-    @ExactlySize(3)
-    public String currency;
-    @Min(1)
-    public long amount;
-    public Long level;
-  }
+        @Schema(description = "The payment provider associated with the subscription")
+        PaymentProvider processor,
 
-  public static class CreatePayPalBoostRequest extends CreateBoostRequest {
+        @Schema(description = "The payment method associated with the subscription")
+        PaymentMethod paymentMethod,
 
-    @NotEmpty
-    public String returnUrl;
-    @NotEmpty
-    public String cancelUrl;
-  }
-
-  record CreatePayPalBoostResponse(String approvalUrl, String paymentId) {
-
-  }
-
-  public static class CreateBoostResponse {
-
-    private final String clientSecret;
-
-    @JsonCreator
-    public CreateBoostResponse(
-        @JsonProperty("clientSecret") String clientSecret) {
-      this.clientSecret = clientSecret;
-    }
-
-    public String getClientSecret() {
-      return clientSecret;
-    }
-  }
-
-  /**
-   * Creates a Stripe PaymentIntent with the requested amount and currency
-   */
-  @POST
-  @Path("/boost/create")
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_JSON)
-  public CompletableFuture<Response> createBoostPaymentIntent(@NotNull @Valid CreateBoostRequest request) {
-    return CompletableFuture.runAsync(() -> {
-          if (request.level == null) {
-            request.level = oneTimeDonationConfiguration.boost().level();
-          }
-          BigDecimal amount = BigDecimal.valueOf(request.amount);
-          if (request.level == oneTimeDonationConfiguration.gift().level()) {
-            BigDecimal amountConfigured = oneTimeDonationConfiguration.currencies()
-                .get(request.currency.toLowerCase(Locale.ROOT)).gift();
-            if (amountConfigured == null ||
-                SubscriptionCurrencyUtil.convertConfiguredAmountToStripeAmount(request.currency, amountConfigured)
-                    .compareTo(amount) != 0) {
-              throw new WebApplicationException(
-                  Response.status(Status.CONFLICT).entity(Map.of("error", "level_amount_mismatch")).build());
-            }
-          }
-          validateRequestCurrencyAmount(request, amount, stripeManager);
-        })
-        .thenCompose(unused -> stripeManager.createPaymentIntent(request.currency, request.amount, request.level))
-        .thenApply(paymentIntent -> Response.ok(new CreateBoostResponse(paymentIntent.getClientSecret())).build());
-  }
-
-  /**
-   * Validates that the currency and amount in the request are supported by the {@code manager} and exceed the minimum
-   * permitted amount
-   *
-   * @throws BadRequestException indicates validation failed. Inspect {@code response.error} for details
-   */
-  private void validateRequestCurrencyAmount(CreateBoostRequest request, BigDecimal amount,
-      SubscriptionProcessorManager manager) {
-
-    if (!manager.supportsCurrency(request.currency.toLowerCase(Locale.ROOT))) {
-      throw new BadRequestException(Response.status(Status.BAD_REQUEST)
-          .entity(Map.of("error", "unsupported_currency")).build());
-    }
-
-    BigDecimal minCurrencyAmountMajorUnits = oneTimeDonationConfiguration.currencies()
-        .get(request.currency.toLowerCase(Locale.ROOT)).minimum();
-    BigDecimal minCurrencyAmountMinorUnits = SubscriptionCurrencyUtil.convertConfiguredAmountToApiAmount(
-        request.currency,
-        minCurrencyAmountMajorUnits);
-    if (minCurrencyAmountMinorUnits.compareTo(amount) > 0) {
-      throw new BadRequestException(Response.status(Status.BAD_REQUEST)
-          .entity(Map.of(
-              "error", "amount_below_currency_minimum",
-              "minimum", minCurrencyAmountMajorUnits.toString())).build());
-    }
-  }
-
-  @POST
-  @Path("/boost/paypal/create")
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_JSON)
-  public CompletableFuture<Response> createPayPalBoost(@NotNull @Valid CreatePayPalBoostRequest request,
-      @Context ContainerRequestContext containerRequestContext) {
-
-    return CompletableFuture.runAsync(() -> {
-          if (request.level == null) {
-            request.level = oneTimeDonationConfiguration.boost().level();
-          }
-
-          validateRequestCurrencyAmount(request, BigDecimal.valueOf(request.amount), braintreeManager);
-        })
-        .thenCompose(unused -> {
-          final Locale locale = getAcceptableLanguagesForRequest(containerRequestContext).stream()
-              .filter(l -> !"*".equals(l.getLanguage()))
-              .findFirst()
-              .orElse(Locale.US);
-
-          return braintreeManager.createOneTimePayment(request.currency.toUpperCase(Locale.ROOT), request.amount,
-              locale.toLanguageTag(),
-              request.returnUrl, request.cancelUrl);
-        })
-        .thenApply(approvalDetails -> Response.ok(
-            new CreatePayPalBoostResponse(approvalDetails.approvalUrl(), approvalDetails.paymentId())).build());
-  }
-
-  public static class ConfirmPayPalBoostRequest extends CreateBoostRequest {
-
-    @NotEmpty
-    public String payerId;
-    @NotEmpty
-    public String paymentId; // PAYID-…
-    @NotEmpty
-    public String paymentToken; // EC-…
-  }
-
-  record ConfirmPayPalBoostResponse(String paymentId) {
-
-  }
-
-  @POST
-  @Path("/boost/paypal/confirm")
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_JSON)
-  public CompletableFuture<Response> confirmPayPalBoost(@NotNull @Valid ConfirmPayPalBoostRequest request) {
-
-    return CompletableFuture.runAsync(() -> {
-          if (request.level == null) {
-            request.level = oneTimeDonationConfiguration.boost().level();
-          }
-        })
-        .thenCompose(unused -> braintreeManager.captureOneTimePayment(request.payerId, request.paymentId,
-            request.paymentToken, request.currency, request.amount, request.level))
-        .thenApply(chargeSuccessDetails -> Response.ok(
-            new ConfirmPayPalBoostResponse(chargeSuccessDetails.paymentId())).build());
-  }
-
-  public static class CreateBoostReceiptCredentialsRequest {
-
-    /**
-     * a payment ID from {@link #processor}
-     */
-    @NotNull
-    public String paymentIntentId;
-    @NotNull
-    public byte[] receiptCredentialRequest;
-
-    @NotNull
-    public SubscriptionProcessor processor = SubscriptionProcessor.STRIPE;
-  }
-
-  public static class CreateBoostReceiptCredentialsResponse {
-
-    private final byte[] receiptCredentialResponse;
-
-    @JsonCreator
-    public CreateBoostReceiptCredentialsResponse(
-        @JsonProperty("receiptCredentialResponse") byte[] receiptCredentialResponse) {
-      this.receiptCredentialResponse = receiptCredentialResponse;
-    }
-
-    public byte[] getReceiptCredentialResponse() {
-      return receiptCredentialResponse;
-    }
-  }
-
-  @POST
-  @Path("/boost/receipt_credentials")
-  @Consumes(MediaType.APPLICATION_JSON)
-  @Produces(MediaType.APPLICATION_JSON)
-  public CompletableFuture<Response> createBoostReceiptCredentials(
-      @NotNull @Valid final CreateBoostReceiptCredentialsRequest request,
-      @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent) {
-
-    final SubscriptionProcessorManager manager = getManagerForProcessor(request.processor);
-
-    return manager.getPaymentDetails(request.paymentIntentId)
-        .thenCompose(paymentDetails -> {
-          if (paymentDetails == null) {
-            throw new WebApplicationException(Status.NOT_FOUND);
-          }
-          switch (paymentDetails.status()) {
-            case PROCESSING -> throw new WebApplicationException(Status.NO_CONTENT);
-            case SUCCEEDED -> {
-            }
-            default -> throw new WebApplicationException(Status.PAYMENT_REQUIRED);
-          }
-
-          long level = oneTimeDonationConfiguration.boost().level();
-          if (paymentDetails.customMetadata() != null) {
-            String levelMetadata = paymentDetails.customMetadata()
-                .getOrDefault("level", Long.toString(oneTimeDonationConfiguration.boost().level()));
-            try {
-              level = Long.parseLong(levelMetadata);
-            } catch (NumberFormatException e) {
-              logger.error("failed to parse level metadata ({}) on payment intent {}", levelMetadata,
-                  paymentDetails.id(), e);
-              throw new WebApplicationException(Status.INTERNAL_SERVER_ERROR);
-            }
-          }
-          Duration levelExpiration;
-          if (oneTimeDonationConfiguration.boost().level() == level) {
-            levelExpiration = oneTimeDonationConfiguration.boost().expiration();
-          } else if (oneTimeDonationConfiguration.gift().level() == level) {
-            levelExpiration = oneTimeDonationConfiguration.gift().expiration();
-          } else {
-            logger.error("level ({}) returned from payment intent that is unknown to the server", level);
-            throw new WebApplicationException(Status.INTERNAL_SERVER_ERROR);
-          }
-          ReceiptCredentialRequest receiptCredentialRequest;
-          try {
-            receiptCredentialRequest = new ReceiptCredentialRequest(request.receiptCredentialRequest);
-          } catch (InvalidInputException e) {
-            throw new BadRequestException("invalid receipt credential request", e);
-          }
-          final long finalLevel = level;
-          return issuedReceiptsManager.recordIssuance(paymentDetails.id(), manager.getProcessor(),
-                  receiptCredentialRequest, clock.instant())
-              .thenApply(unused -> {
-                Instant expiration = paymentDetails.created()
-                    .plus(levelExpiration)
-                    .truncatedTo(ChronoUnit.DAYS)
-                    .plus(1, ChronoUnit.DAYS);
-                ReceiptCredentialResponse receiptCredentialResponse;
-                try {
-                  receiptCredentialResponse = zkReceiptOperations.issueReceiptCredential(
-                      receiptCredentialRequest, expiration.getEpochSecond(), finalLevel);
-                } catch (VerificationFailedException e) {
-                  throw new BadRequestException("receipt credential request failed verification", e);
-                }
-                Metrics.counter(RECEIPT_ISSUED_COUNTER_NAME,
-                        Tags.of(
-                            Tag.of(PROCESSOR_TAG_NAME, manager.getProcessor().toString()),
-                            Tag.of(TYPE_TAG_NAME, "boost"),
-                            UserAgentTagUtil.getPlatformTag(userAgent)))
-                    .increment();
-                return Response.ok(new CreateBoostReceiptCredentialsResponse(receiptCredentialResponse.serialize()))
-                    .build();
-              });
-        });
-  }
-
-  public static class GetSubscriptionInformationResponse {
-
-    public static class Subscription {
-
-      private final long level;
-      private final Instant billingCycleAnchor;
-      private final Instant endOfCurrentPeriod;
-      private final boolean active;
-      private final boolean cancelAtPeriodEnd;
-      private final String currency;
-      private final BigDecimal amount;
-      private final String status;
-      private final SubscriptionProcessor processor;
-
-      @JsonCreator
-      public Subscription(
-          @JsonProperty("level") long level,
-          @JsonProperty("billingCycleAnchor") Instant billingCycleAnchor,
-          @JsonProperty("endOfCurrentPeriod") Instant endOfCurrentPeriod,
-          @JsonProperty("active") boolean active,
-          @JsonProperty("cancelAtPeriodEnd") boolean cancelAtPeriodEnd,
-          @JsonProperty("currency") String currency,
-          @JsonProperty("amount") BigDecimal amount,
-          @JsonProperty("status") String status,
-          @JsonProperty("processor") SubscriptionProcessor processor) {
-        this.level = level;
-        this.billingCycleAnchor = billingCycleAnchor;
-        this.endOfCurrentPeriod = endOfCurrentPeriod;
-        this.active = active;
-        this.cancelAtPeriodEnd = cancelAtPeriodEnd;
-        this.currency = currency;
-        this.amount = amount;
-        this.status = status;
-        this.processor = processor;
-      }
-
-      public long getLevel() {
-        return level;
-      }
-
-      public Instant getBillingCycleAnchor() {
-        return billingCycleAnchor;
-      }
-
-      public Instant getEndOfCurrentPeriod() {
-        return endOfCurrentPeriod;
-      }
-
-      public boolean isActive() {
-        return active;
-      }
-
-      public boolean isCancelAtPeriodEnd() {
-        return cancelAtPeriodEnd;
-      }
-
-      public String getCurrency() {
-        return currency;
-      }
-
-      public BigDecimal getAmount() {
-        return amount;
-      }
-
-      public String getStatus() {
-        return status;
-      }
-
-      public SubscriptionProcessor getProcessor() {
-        return processor;
-      }
-    }
-
-    public static class ChargeFailure {
-      private final String code;
-      private final String message;
-      private final String outcomeNetworkStatus;
-      private final String outcomeReason;
-      private final String outcomeType;
-
-      @JsonCreator
-      public ChargeFailure(
-          @JsonProperty("code") String code,
-          @JsonProperty("message") String message,
-          @JsonProperty("outcomeNetworkStatus") String outcomeNetworkStatus,
-          @JsonProperty("outcomeReason") String outcomeReason,
-          @JsonProperty("outcomeType") String outcomeType) {
-        this.code = code;
-        this.message = message;
-        this.outcomeNetworkStatus = outcomeNetworkStatus;
-        this.outcomeReason = outcomeReason;
-        this.outcomeType = outcomeType;
-      }
-
-      public String getCode() {
-        return code;
-      }
-
-      public String getMessage() {
-        return message;
-      }
-
-      public String getOutcomeNetworkStatus() {
-        return outcomeNetworkStatus;
-      }
-
-      public String getOutcomeReason() {
-        return outcomeReason;
-      }
-
-      public String getOutcomeType() {
-        return outcomeType;
-      }
-    }
-
-    private final Subscription subscription;
-    private final ChargeFailure chargeFailure;
-
-    @JsonCreator
-    public GetSubscriptionInformationResponse(
-        @JsonProperty("subscription") Subscription subscription,
-        @JsonProperty("chargeFailure") ChargeFailure chargeFailure) {
-      this.subscription = subscription;
-      this.chargeFailure = chargeFailure;
-    }
-
-    public Subscription getSubscription() {
-      return subscription;
-    }
-
-    @JsonInclude(Include.NON_NULL)
-    public ChargeFailure getChargeFailure() {
-      return chargeFailure;
-    }
+        @Schema(description = "Whether the latest invoice for the subscription is in a non-terminal state")
+        boolean paymentProcessing) {}
   }
 
   @GET
   @Path("/{subscriberId}")
   @Produces(MediaType.APPLICATION_JSON)
+  @Operation(summary = "Subscription information", description = """
+      Returns information about the current subscription associated with the provided subscriberId if one exists.
+  
+      Although it uses [Stripe’s values](https://stripe.com/docs/billing/subscriptions/overview#subscription-statuses),
+      the status field in the response is generic, with [Braintree-specific values](https://developer.paypal.com/braintree/docs/guides/recurring-billing/overview#subscription-statuses) mapped
+      to Stripe's. Since we don’t support trials or unpaid subscriptions, the associated statuses will never be returned
+      by the API.
+      """)
+  @ApiResponse(responseCode = "200", description = "The subscriberId exists", content = @Content(schema = @Schema(implementation = GetSubscriptionInformationResponse.class)))
+  @ApiResponse(responseCode = "403", description = "subscriberId authentication failure OR account authentication is present")
+  @ApiResponse(responseCode = "404", description = "No such subscriberId exists or subscriberId is malformed")
   public CompletableFuture<Response> getSubscriptionInformation(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
-      @PathParam("subscriberId") String subscriberId) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> {
-            if (record.subscriptionId == null) {
-                return CompletableFuture.completedFuture(Response.ok(new GetSubscriptionInformationResponse(null, null)).build());
-            }
-
-            final SubscriptionProcessorManager manager = getManagerForProcessor(record.getProcessorCustomer().orElseThrow().processor());
-
-            return manager.getSubscription(record.subscriptionId).thenCompose(subscription ->
-                    manager.getSubscriptionInformation(subscription).thenApply(subscriptionInformation -> {
-                        final GetSubscriptionInformationResponse.ChargeFailure chargeFailure = Optional.ofNullable(subscriptionInformation.chargeFailure())
-                                .map(chargeFailure1 -> new GetSubscriptionInformationResponse.ChargeFailure(
-                                        subscriptionInformation.chargeFailure().code(),
-                                        subscriptionInformation.chargeFailure().message(),
-                                        subscriptionInformation.chargeFailure().outcomeNetworkStatus(),
-                                        subscriptionInformation.chargeFailure().outcomeReason(),
-                                        subscriptionInformation.chargeFailure().outcomeType()
-                                ))
-                                .orElse(null);
-                        return Response.ok(
-                                new GetSubscriptionInformationResponse(
-                                    new GetSubscriptionInformationResponse.Subscription(
-                                        subscriptionInformation.level(),
-                                        subscriptionInformation.billingCycleAnchor(),
-                                        subscriptionInformation.endOfCurrentPeriod(),
-                                        subscriptionInformation.active(),
-                                        subscriptionInformation.cancelAtPeriodEnd(),
-                                        subscriptionInformation.price().currency(),
-                                        subscriptionInformation.price().amount(),
-                                        subscriptionInformation.status().getApiValue(),
-                                        manager.getProcessor()),
-                                    chargeFailure
-                                )).build();
-                    }));
-        });
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    return subscriptionManager.getSubscriptionInformation(subscriberCredentials).thenApply(maybeInfo -> maybeInfo
+        .map(subscriptionInformation -> Response.ok(
+            new GetSubscriptionInformationResponse(
+                new GetSubscriptionInformationResponse.Subscription(
+                    subscriptionInformation.level(),
+                    subscriptionInformation.billingCycleAnchor(),
+                    subscriptionInformation.endOfCurrentPeriod(),
+                    subscriptionInformation.active(),
+                    subscriptionInformation.cancelAtPeriodEnd(),
+                    subscriptionInformation.price().currency(),
+                    subscriptionInformation.price().amount(),
+                    subscriptionInformation.status().getApiValue(),
+                    subscriptionInformation.paymentProvider(),
+                    subscriptionInformation.paymentMethod(),
+                    subscriptionInformation.paymentProcessing()),
+                subscriptionInformation.chargeFailure()
+            )).build())
+        .orElseGet(() -> Response.ok(new GetSubscriptionInformationResponse(null, null)).build()));
   }
 
-  public static class GetReceiptCredentialsRequest {
-
-    private final byte[] receiptCredentialRequest;
-
-    @JsonCreator
-    public GetReceiptCredentialsRequest(
-        @JsonProperty("receiptCredentialRequest") byte[] receiptCredentialRequest) {
-      this.receiptCredentialRequest = receiptCredentialRequest;
-    }
-
-    @NotEmpty
-    public byte[] getReceiptCredentialRequest() {
-      return receiptCredentialRequest;
-    }
+  public record GetReceiptCredentialsRequest(@NotEmpty byte[] receiptCredentialRequest) {
   }
 
-  public static class GetReceiptCredentialsResponse {
-
-    private final byte[] receiptCredentialResponse;
-
-    @JsonCreator
-    public GetReceiptCredentialsResponse(
-        @JsonProperty("receiptCredentialResponse") byte[] receiptCredentialResponse) {
-      this.receiptCredentialResponse = receiptCredentialResponse;
-    }
-
-    @NotEmpty
-    public byte[] getReceiptCredentialResponse() {
-      return receiptCredentialResponse;
-    }
+  public record GetReceiptCredentialsResponse(@NotEmpty byte[] receiptCredentialResponse) {
   }
 
   @POST
@@ -1223,170 +651,97 @@ public class SubscriptionController {
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
   public CompletableFuture<Response> createSubscriptionReceiptCredentials(
-      @Auth Optional<AuthenticatedAccount> authenticatedAccount,
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
       @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent,
       @PathParam("subscriberId") String subscriberId,
-      @NotNull @Valid GetReceiptCredentialsRequest request) {
-    RequestData requestData = RequestData.process(authenticatedAccount, subscriberId, clock);
-    return subscriptionManager.get(requestData.subscriberUser, requestData.hmac)
-        .thenApply(this::requireRecordFromGetResult)
-        .thenCompose(record -> {
-            if (record.subscriptionId == null) {
-                return CompletableFuture.completedFuture(Response.status(Status.NOT_FOUND).build());
-            }
-            ReceiptCredentialRequest receiptCredentialRequest;
-            try {
-                receiptCredentialRequest = new ReceiptCredentialRequest(request.getReceiptCredentialRequest());
-            } catch (InvalidInputException e) {
-                throw new BadRequestException("invalid receipt credential request", e);
-            }
-
-            final SubscriptionProcessorManager manager = getManagerForProcessor(record.getProcessorCustomer().orElseThrow().processor());
-            return manager.getReceiptItem(record.subscriptionId)
-                    .thenCompose(receipt -> issuedReceiptsManager.recordIssuance(
-                            receipt.itemId(), manager.getProcessor(), receiptCredentialRequest,
-                            requestData.now)
-                            .thenApply(unused -> receipt))
-                    .thenApply(receipt -> {
-                      ReceiptCredentialResponse receiptCredentialResponse;
-                      try {
-                        receiptCredentialResponse = zkReceiptOperations.issueReceiptCredential(
-                            receiptCredentialRequest,
-                            receiptExpirationWithGracePeriod(receipt.expiration()).getEpochSecond(), receipt.level());
-                      } catch (VerificationFailedException e) {
-                        throw new BadRequestException("receipt credential request failed verification", e);
-                      }
-                      Metrics.counter(RECEIPT_ISSUED_COUNTER_NAME,
-                              Tags.of(
-                                  Tag.of(PROCESSOR_TAG_NAME, manager.getProcessor().toString()),
-                                  Tag.of(TYPE_TAG_NAME, "subscription"),
-                                  UserAgentTagUtil.getPlatformTag(userAgent)))
-                          .increment();
-                      return Response.ok(new GetReceiptCredentialsResponse(receiptCredentialResponse.serialize()))
-                          .build();
-                    });
-        });
+      @NotNull @Valid GetReceiptCredentialsRequest request) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials = SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
+    return subscriptionManager.createReceiptCredentials(subscriberCredentials, request, this::receiptExpirationWithGracePeriod)
+        .thenApply(receiptCredential -> {
+          final ReceiptCredentialResponse receiptCredentialResponse = receiptCredential.receiptCredentialResponse();
+          final CustomerAwareSubscriptionPaymentProcessor.ReceiptItem receipt = receiptCredential.receiptItem();
+          Metrics.counter(RECEIPT_ISSUED_COUNTER_NAME,
+                  Tags.of(
+                      Tag.of(PROCESSOR_TAG_NAME, receiptCredential.paymentProvider().toString()),
+                      Tag.of(TYPE_TAG_NAME, "subscription"),
+                      Tag.of(SUBSCRIPTION_TYPE_TAG_NAME,
+                          subscriptionConfiguration.getSubscriptionLevel(receipt.level()).type().name()
+                              .toLowerCase(Locale.ROOT)),
+                      UserAgentTagUtil.getPlatformTag(userAgent)))
+              .increment();
+          return Response.ok(new GetReceiptCredentialsResponse(receiptCredentialResponse.serialize())).build();
+        })
+        .exceptionally(ExceptionUtils.exceptionallyHandler(
+            SubscriptionException.ReceiptRequestedForOpenPayment.class,
+            e -> Response.noContent().build()));
   }
 
-    private Instant receiptExpirationWithGracePeriod(Instant itemExpiration) {
-        return itemExpiration.plus(subscriptionConfiguration.getBadgeGracePeriod())
-                .truncatedTo(ChronoUnit.DAYS)
-                .plus(1, ChronoUnit.DAYS);
-    }
+  @POST
+  @Path("/{subscriberId}/default_payment_method_for_ideal/{setupIntentId}")
+  @Produces(MediaType.APPLICATION_JSON)
+  public CompletableFuture<Response> setDefaultPaymentMethodForIdeal(
+      @ReadOnly @Auth Optional<AuthenticatedDevice> authenticatedAccount,
+      @PathParam("subscriberId") String subscriberId,
+      @PathParam("setupIntentId") @NotEmpty String setupIntentId) throws SubscriptionException {
+    SubscriberCredentials subscriberCredentials =
+        SubscriberCredentials.process(authenticatedAccount, subscriberId, clock);
 
-    private String getSubscriptionTemplateId(long level, String currency, SubscriptionProcessor processor) {
-      SubscriptionLevelConfiguration levelConfiguration = subscriptionConfiguration.getLevels().get(level);
-      if (levelConfiguration == null) {
-        throw new BadRequestException(Response.status(Status.BAD_REQUEST)
-            .entity(new SetSubscriptionLevelErrorResponse(List.of(
-                new SetSubscriptionLevelErrorResponse.Error(
-                    SetSubscriptionLevelErrorResponse.Error.Type.UNSUPPORTED_LEVEL, null))))
-            .build());
-      }
-
-      return Optional.ofNullable(levelConfiguration.getPrices()
-              .get(currency.toLowerCase(Locale.ROOT)))
-          .map(priceConfiguration -> priceConfiguration.processorIds().get(processor))
-          .orElseThrow(() -> new BadRequestException(Response.status(Status.BAD_REQUEST)
-              .entity(new SetSubscriptionLevelErrorResponse(List.of(
-                  new SetSubscriptionLevelErrorResponse.Error(
-                      SetSubscriptionLevelErrorResponse.Error.Type.UNSUPPORTED_CURRENCY, null))))
-              .build()));
-    }
-
-  private SubscriptionManager.Record requireRecordFromGetResult(SubscriptionManager.GetResult getResult) {
-    if (getResult == GetResult.PASSWORD_MISMATCH) {
-      throw new ForbiddenException("subscriberId mismatch");
-    } else if (getResult == GetResult.NOT_STORED) {
-      throw new NotFoundException();
-    } else {
-      return getResult.record;
-    }
+    return stripeManager.getGeneratedSepaIdFromSetupIntent(setupIntentId)
+        .thenCompose(generatedSepaId -> setDefaultPaymentMethod(stripeManager, generatedSepaId, subscriberCredentials));
   }
 
-  private List<Locale> getAcceptableLanguagesForRequest(ContainerRequestContext containerRequestContext) {
+  private CompletableFuture<Response> setDefaultPaymentMethod(final CustomerAwareSubscriptionPaymentProcessor manager,
+      final String paymentMethodId,
+      final SubscriberCredentials requestData) {
+    return subscriptionManager.getSubscriber(requestData)
+        .thenCompose(record -> record.getProcessorCustomer()
+            .map(processorCustomer -> manager.setDefaultPaymentMethodForCustomer(processorCustomer.customerId(),
+                paymentMethodId, record.subscriptionId))
+            .orElseThrow(() ->
+                // a missing customer ID indicates the client made requests out of order,
+                // and needs to call create_payment_method to create a customer for the given payment method
+                new ClientErrorException(Status.CONFLICT)))
+        .thenApply(customer -> Response.ok().build());
+  }
+
+  private Instant receiptExpirationWithGracePeriod(CustomerAwareSubscriptionPaymentProcessor.ReceiptItem receiptItem) {
+    final PaymentTime paymentTime = receiptItem.paymentTime();
+    return switch (subscriptionConfiguration.getSubscriptionLevel(receiptItem.level()).type()) {
+      case DONATION -> paymentTime.receiptExpiration(
+          subscriptionConfiguration.getBadgeExpiration(),
+          subscriptionConfiguration.getBadgeGracePeriod());
+      case BACKUP -> paymentTime.receiptExpiration(
+          subscriptionConfiguration.getBackupExpiration(),
+          subscriptionConfiguration.getBackupGracePeriod());
+    };
+  }
+
+
+  private String getSubscriptionTemplateId(long level, String currency, PaymentProvider processor) {
+    final SubscriptionLevelConfiguration config = subscriptionConfiguration.getSubscriptionLevel(level);
+    if (config == null) {
+      throw new BadRequestException(Response.status(Status.BAD_REQUEST)
+          .entity(new SetSubscriptionLevelErrorResponse(List.of(
+              new SetSubscriptionLevelErrorResponse.Error(
+                  SetSubscriptionLevelErrorResponse.Error.Type.UNSUPPORTED_LEVEL, null))))
+          .build());
+    }
+    final Optional<String> templateId = Optional
+        .ofNullable(config.prices().get(currency.toLowerCase(Locale.ROOT)))
+        .map(priceConfiguration -> priceConfiguration.processorIds().get(processor));
+    return templateId.orElseThrow(() -> new BadRequestException(Response.status(Status.BAD_REQUEST)
+        .entity(new SetSubscriptionLevelErrorResponse(List.of(
+            new SetSubscriptionLevelErrorResponse.Error(
+                SetSubscriptionLevelErrorResponse.Error.Type.UNSUPPORTED_CURRENCY, null))))
+        .build()));
+  }
+
+  @Nullable
+  private static ClientPlatform getClientPlatform(@Nullable final String userAgentString) {
     try {
-      return containerRequestContext.getAcceptableLanguages();
-    } catch (final ProcessingException e) {
-      final String userAgent = containerRequestContext.getHeaderString(HttpHeaders.USER_AGENT);
-      Metrics.counter(INVALID_ACCEPT_LANGUAGE_COUNTER_NAME, Tags.of(UserAgentTagUtil.getPlatformTag(userAgent))).increment();
-      logger.debug("Could not get acceptable languages; Accept-Language: {}; User-Agent: {}",
-          containerRequestContext.getHeaderString(HttpHeaders.ACCEPT_LANGUAGE),
-          userAgent,
-          e);
-
-      return List.of();
-    }
-  }
-
-  private static class RequestData {
-
-    public final byte[] subscriberBytes;
-    public final byte[] subscriberUser;
-    public final byte[] subscriberKey;
-    public final byte[] hmac;
-    public final Instant now;
-
-    private RequestData(
-        @Nonnull byte[] subscriberBytes,
-        @Nonnull byte[] subscriberUser,
-        @Nonnull byte[] subscriberKey,
-        @Nonnull byte[] hmac,
-        @Nonnull Instant now) {
-      this.subscriberBytes = Objects.requireNonNull(subscriberBytes);
-      this.subscriberUser = Objects.requireNonNull(subscriberUser);
-      this.subscriberKey = Objects.requireNonNull(subscriberKey);
-      this.hmac = Objects.requireNonNull(hmac);
-      this.now = Objects.requireNonNull(now);
-    }
-
-    public static RequestData process(
-        Optional<AuthenticatedAccount> authenticatedAccount,
-        String subscriberId,
-        Clock clock) {
-      Instant now = clock.instant();
-      if (authenticatedAccount.isPresent()) {
-        throw new ForbiddenException("must not use authenticated connection for subscriber operations");
-      }
-      byte[] subscriberBytes = convertSubscriberIdStringToBytes(subscriberId);
-      byte[] subscriberUser = getUser(subscriberBytes);
-      byte[] subscriberKey = getKey(subscriberBytes);
-      byte[] hmac = computeHmac(subscriberUser, subscriberKey);
-      return new RequestData(subscriberBytes, subscriberUser, subscriberKey, hmac, now);
-    }
-
-    private static byte[] convertSubscriberIdStringToBytes(String subscriberId) {
-      try {
-        byte[] bytes = Base64.getUrlDecoder().decode(subscriberId);
-        if (bytes.length != 32) {
-          throw new NotFoundException();
-        }
-        return bytes;
-      } catch (IllegalArgumentException e) {
-        throw new NotFoundException(e);
-      }
-    }
-
-    private static byte[] getUser(byte[] subscriberBytes) {
-      byte[] user = new byte[16];
-      System.arraycopy(subscriberBytes, 0, user, 0, user.length);
-      return user;
-    }
-
-    private static byte[] getKey(byte[] subscriberBytes) {
-      byte[] key = new byte[16];
-      System.arraycopy(subscriberBytes, 16, key, 0, key.length);
-      return key;
-    }
-
-    private static byte[] computeHmac(byte[] subscriberUser, byte[] subscriberKey) {
-      try {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(subscriberKey, "HmacSHA256"));
-        return mac.doFinal(subscriberUser);
-      } catch (NoSuchAlgorithmException | InvalidKeyException e) {
-        throw new InternalServerErrorException(e);
-      }
+      return UserAgentUtil.parseUserAgentString(userAgentString).getPlatform();
+    } catch (final UnrecognizedUserAgentException e) {
+      return null;
     }
   }
 }

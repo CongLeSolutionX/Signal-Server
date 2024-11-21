@@ -1,3 +1,8 @@
+/*
+ * Copyright 2023 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 syntax = "proto3";
 
 option java_multiple_files = true;
@@ -99,6 +104,14 @@ service KeysAnonymous {
    * devices.
    */
   rpc GetPreKeys(GetPreKeysAnonymousRequest) returns (GetPreKeysResponse) {}
+
+  /**
+   * Checks identity key fingerprints of the target accounts.
+   *
+   * Returns a stream of elements, each one representing an account that had a mismatched
+   * identity key fingerprint with the server and the corresponding identity key stored by the server.
+   */
+  rpc CheckIdentityKeys(stream CheckIdentityKeyRequest) returns (stream CheckIdentityKeyResponse) {}
 }
 
 message GetPreKeyCountRequest {
@@ -141,7 +154,7 @@ message GetPreKeysRequest {
    * retrieve pre-keys. If not set, pre-keys are returned for all devices
    * associated with the targeted account.
    */
-  uint64 device_id = 2;
+  optional uint32 device_id = 2;
 }
 
 message GetPreKeysAnonymousRequest {
@@ -151,9 +164,19 @@ message GetPreKeysAnonymousRequest {
   GetPreKeysRequest request = 1;
 
   /**
-   * The unidentified access key (UAK) for the targeted account.
+   * A means to authorize the request.
    */
-  bytes unidentified_access_key = 2;
+  oneof authorization {
+    /**
+     * The unidentified access key (UAK) for the targeted account.
+     */
+    bytes unidentified_access_key = 2;
+
+    /**
+     * A group send endorsement token for the targeted account.
+     */
+    bytes group_send_token = 3;
+  }
 }
 
 message GetPreKeysResponse {
@@ -186,7 +209,7 @@ message GetPreKeysResponse {
   /**
    * A map of device IDs to pre-key "bundles" for the targeted account.
    */
-  map<uint64, PreKeyBundle> pre_keys = 2;
+  map<uint32, PreKeyBundle> pre_keys = 2;
 }
 
 message SetOneTimeEcPreKeysRequest {
@@ -242,3 +265,24 @@ message SetKemLastResortPreKeyRequest {
 message SetPreKeyResponse {
 }
 
+message CheckIdentityKeyRequest {
+  /**
+   * The service identifier of the account for which we want to check the associated identity key fingerprint.
+   */
+  common.ServiceIdentifier target_identifier = 1;
+  /**
+   * The most significant 4 bytes of the SHA-256 hash of the identity key associated with the target account/identity type.
+   */
+  bytes fingerprint = 2;
+}
+
+message CheckIdentityKeyResponse {
+  /**
+   * The service identifier of the account for which there is a mismatch between the client and server identity key fingerprints.
+   */
+  common.ServiceIdentifier target_identifier = 1;
+  /**
+   * The identity key that is stored by the server for the target account/identity type.
+   */
+  bytes identity_key = 2;
+}

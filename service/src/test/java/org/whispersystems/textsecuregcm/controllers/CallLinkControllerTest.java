@@ -10,12 +10,11 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.google.common.collect.ImmutableSet;
-import io.dropwizard.auth.PolymorphicAuthValueFactoryProvider;
+import io.dropwizard.auth.AuthValueFactoryProvider;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.core.Response;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.core.Response;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,8 +22,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.signal.libsignal.protocol.util.Hex;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.calllinks.CreateCallLinkCredentialRequestContext;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
-import org.whispersystems.textsecuregcm.auth.DisabledPermittedAuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.entities.GetCreateCallLinkCredentialsRequest;
 import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
@@ -43,8 +41,7 @@ public class CallLinkControllerTest {
 
   private static final ResourceExtension resources = ResourceExtension.builder()
       .addProvider(AuthHelper.getAuthFilter())
-      .addProvider(new PolymorphicAuthValueFactoryProvider.Binder<>(
-          ImmutableSet.of(AuthenticatedAccount.class, DisabledPermittedAuthenticatedAccount.class)))
+      .addProvider(new AuthValueFactoryProvider.Binder<>(AuthenticatedDevice.class))
       .addProvider(new RateLimitExceededExceptionMapper())
       .setMapper(SystemMapper.jsonMapper())
       .setTestContainerFactory(new GrizzlyWebTestContainerFactory())
@@ -125,7 +122,7 @@ public class CallLinkControllerTest {
 
   @Test
   void testGetCreateAuthRatelimited() throws RateLimitExceededException{
-    doThrow(new RateLimitExceededException(null, false))
+    doThrow(new RateLimitExceededException(null))
         .when(createCallLinkLimiter).validate(AuthHelper.VALID_UUID);
 
     try (Response response = resources.getJerseyTest()

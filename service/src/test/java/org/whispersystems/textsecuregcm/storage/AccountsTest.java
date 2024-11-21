@@ -6,12 +6,14 @@
 package org.whispersystems.textsecuregcm.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,15 +22,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.uuid.UUIDComparator;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -36,33 +37,38 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
-import org.apache.commons.lang3.RandomUtils;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.experiment.ExperimentEnrollmentManager;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
-import org.whispersystems.textsecuregcm.securebackup.SecureBackupClient;
-import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
-import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.DevicesHelper;
 import org.whispersystems.textsecuregcm.util.AttributeValues;
+import org.whispersystems.textsecuregcm.util.CompletableFutureTestUtil;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.textsecuregcm.util.TestClock;
+import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 import reactor.core.scheduler.Schedulers;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
+import software.amazon.awssdk.services.dynamodb.model.CancellationReason;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
@@ -71,12 +77,16 @@ import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.ReturnValuesOnConditionCheckFailure;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
+import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsResponse;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 import software.amazon.awssdk.services.dynamodb.model.TransactionConflictException;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
 
 @Timeout(value = 10, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class AccountsTest {
+
+  private static final byte DEVICE_ID_1 = 1;
+  private static final byte DEVICE_ID_2 = 2;
 
   private static final String BASE_64_URL_USERNAME_HASH_1 = "9p6Tip7BFefFOJzv4kv4GyXEYsBVfk_WbjNejdlOvQE";
   private static final String BASE_64_URL_USERNAME_HASH_2 = "NLUom-CHwtemcdvOTTXdmXmzRIV7F05leS8lwkVK_vc";
@@ -87,8 +97,6 @@ class AccountsTest {
   private static final byte[] ENCRYPTED_USERNAME_1 = Base64.getUrlDecoder().decode(BASE_64_URL_ENCRYPTED_USERNAME_1);
   private static final byte[] ENCRYPTED_USERNAME_2 = Base64.getUrlDecoder().decode(BASE_64_URL_ENCRYPTED_USERNAME_2);
 
-  private static final int SCAN_PAGE_SIZE = 1;
-
   private static final AtomicInteger ACCOUNT_COUNTER = new AtomicInteger(1);
 
 
@@ -97,7 +105,12 @@ class AccountsTest {
       Tables.ACCOUNTS,
       Tables.NUMBERS,
       Tables.PNI_ASSIGNMENTS,
-      Tables.USERNAMES);
+      Tables.USERNAMES,
+      Tables.DELETED_ACCOUNTS,
+      Tables.USED_LINK_DEVICE_TOKENS,
+
+      // This is an unrelated table used to test "tag-along" transactional updates
+      Tables.CLIENT_RELEASES);
 
   private final TestClock clock = TestClock.pinned(Instant.EPOCH);
   private DynamicConfigurationManager<DynamicConfiguration> mockDynamicConfigManager;
@@ -112,7 +125,8 @@ class AccountsTest {
     when(mockDynamicConfigManager.getConfiguration())
         .thenReturn(new DynamicConfiguration());
 
-    this.accounts = new Accounts(
+    clock.pin(Instant.EPOCH);
+    accounts = new Accounts(
         clock,
         DYNAMO_DB_EXTENSION.getDynamoDbClient(),
         DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient(),
@@ -120,14 +134,15 @@ class AccountsTest {
         Tables.NUMBERS.tableName(),
         Tables.PNI_ASSIGNMENTS.tableName(),
         Tables.USERNAMES.tableName(),
-        SCAN_PAGE_SIZE);
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
   }
 
   @Test
-  public void testStoreAndLookupUsernameLink() throws Exception {
+  public void testStoreAndLookupUsernameLink() {
     final Account account = nextRandomAccount();
-    account.setUsernameHash(RandomUtils.nextBytes(16));
-    accounts.create(account);
+    account.setUsernameHash(TestRandomUtil.nextBytes(16));
+    createAccount(account);
 
     final BiConsumer<Optional<Account>, byte[]> validator = (maybeAccount, expectedEncryptedUsername) -> {
       assertTrue(maybeAccount.isPresent());
@@ -138,79 +153,32 @@ class AccountsTest {
 
     // creating a username link, storing it, checking that it can be looked up
     final UUID linkHandle1 = UUID.randomUUID();
-    final byte[] encruptedUsername1 = RandomUtils.nextBytes(32);
+    final byte[] encruptedUsername1 = TestRandomUtil.nextBytes(32);
     account.setUsernameLinkDetails(linkHandle1, encruptedUsername1);
     accounts.update(account);
-    validator.accept(accounts.getByUsernameLinkHandle(linkHandle1), encruptedUsername1);
+    validator.accept(accounts.getByUsernameLinkHandle(linkHandle1).join(), encruptedUsername1);
 
     // updating username link, storing new one, checking that it can be looked up, checking that old one can't be looked up
     final UUID linkHandle2 = UUID.randomUUID();
-    final byte[] encruptedUsername2 = RandomUtils.nextBytes(32);
+    final byte[] encruptedUsername2 = TestRandomUtil.nextBytes(32);
     account.setUsernameLinkDetails(linkHandle2, encruptedUsername2);
     accounts.update(account);
-    validator.accept(accounts.getByUsernameLinkHandle(linkHandle2), encruptedUsername2);
-    assertTrue(accounts.getByUsernameLinkHandle(linkHandle1).isEmpty());
+    validator.accept(accounts.getByUsernameLinkHandle(linkHandle2).join(), encruptedUsername2);
+    assertTrue(accounts.getByUsernameLinkHandle(linkHandle1).join().isEmpty());
 
     // deleting username link, checking it can't be looked up by either handle
     account.setUsernameLinkDetails(null, null);
     accounts.update(account);
-    assertTrue(accounts.getByUsernameLinkHandle(linkHandle1).isEmpty());
-    assertTrue(accounts.getByUsernameLinkHandle(linkHandle2).isEmpty());
-  }
-
-  @Test
-  public void testUsernameLinksViaAccountsManager() throws Exception {
-    final AccountsManager accountsManager = new AccountsManager(
-        accounts,
-        mock(PhoneNumberIdentifiers.class),
-        mock(FaultTolerantRedisCluster.class),
-        mock(AccountLockManager.class),
-        mock(DeletedAccounts.class),
-        mock(KeysManager.class),
-        mock(MessagesManager.class),
-        mock(ProfilesManager.class),
-        mock(SecureStorageClient.class),
-        mock(SecureBackupClient.class),
-        mock(SecureValueRecovery2Client.class),
-        mock(ClientPresenceManager.class),
-        mock(ExperimentEnrollmentManager.class),
-        mock(RegistrationRecoveryPasswordsManager.class),
-        mock(Clock.class));
-
-    final Account account = nextRandomAccount();
-    account.setUsernameHash(RandomUtils.nextBytes(16));
-    accounts.create(account);
-
-    final UUID linkHandle = UUID.randomUUID();
-    final byte[] encruptedUsername = RandomUtils.nextBytes(32);
-    accountsManager.update(account, a -> a.setUsernameLinkDetails(linkHandle, encruptedUsername));
-
-    final Optional<Account> maybeAccount = accountsManager.getByUsernameLinkHandle(linkHandle);
-    assertTrue(maybeAccount.isPresent());
-    assertTrue(maybeAccount.get().getEncryptedUsername().isPresent());
-    assertArrayEquals(encruptedUsername, maybeAccount.get().getEncryptedUsername().get());
-
-    // making some unrelated change and updating account to check that username link data is still there
-    final Optional<Account> accountToChange = accountsManager.getByAccountIdentifier(account.getUuid());
-    assertTrue(accountToChange.isPresent());
-    accountsManager.update(accountToChange.get(), a -> a.setDiscoverableByPhoneNumber(!a.isDiscoverableByPhoneNumber()));
-    final Optional<Account> accountAfterChange = accountsManager.getByUsernameLinkHandle(linkHandle);
-    assertTrue(accountAfterChange.isPresent());
-    assertTrue(accountAfterChange.get().getEncryptedUsername().isPresent());
-    assertArrayEquals(encruptedUsername, accountAfterChange.get().getEncryptedUsername().get());
-
-    // now deleting the link
-    final Optional<Account> accountToDeleteLink = accountsManager.getByAccountIdentifier(account.getUuid());
-    accountsManager.update(accountToDeleteLink.get(), a -> a.setUsernameLinkDetails(null, null));
-    assertTrue(accounts.getByUsernameLinkHandle(linkHandle).isEmpty());
+    assertTrue(accounts.getByUsernameLinkHandle(linkHandle1).join().isEmpty());
+    assertTrue(accounts.getByUsernameLinkHandle(linkHandle2).join().isEmpty());
   }
 
   @Test
   void testStore() {
-    Device device = generateDevice(1);
+    Device device = generateDevice(DEVICE_ID_1);
     Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(device));
 
-    boolean freshUser = accounts.create(account);
+    boolean freshUser = createAccount(account);
 
     assertThat(freshUser).isTrue();
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
@@ -218,7 +186,7 @@ class AccountsTest {
     assertPhoneNumberConstraintExists("+14151112222", account.getUuid());
     assertPhoneNumberIdentifierConstraintExists(account.getPhoneNumberIdentifier(), account.getUuid());
 
-    freshUser = accounts.create(account);
+    freshUser = createAccount(account);
     assertThat(freshUser).isTrue();
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
 
@@ -227,11 +195,39 @@ class AccountsTest {
   }
 
   @Test
+  void testStoreRecentlyDeleted() {
+    final UUID originalUuid = UUID.randomUUID();
+
+    Device device = generateDevice(DEVICE_ID_1);
+    Account account = generateAccount("+14151112222", originalUuid, UUID.randomUUID(), List.of(device));
+
+    boolean freshUser = createAccount(account);
+
+    assertThat(freshUser).isTrue();
+    verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
+
+    assertPhoneNumberConstraintExists("+14151112222", account.getUuid());
+    assertPhoneNumberIdentifierConstraintExists(account.getPhoneNumberIdentifier(), account.getUuid());
+
+    accounts.delete(originalUuid, Collections.emptyList()).join();
+    assertThat(accounts.findRecentlyDeletedAccountIdentifier(account.getNumber())).hasValue(originalUuid);
+
+    freshUser = createAccount(account);
+    assertThat(freshUser).isTrue();
+    verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
+
+    assertPhoneNumberConstraintExists("+14151112222", account.getUuid());
+    assertPhoneNumberIdentifierConstraintExists(account.getPhoneNumberIdentifier(), account.getUuid());
+
+    assertThat(accounts.findRecentlyDeletedAccountIdentifier(account.getNumber())).isEmpty();
+  }
+
+  @Test
   void testStoreMulti() {
-    final List<Device> devices = List.of(generateDevice(1), generateDevice(2));
+    final List<Device> devices = List.of(generateDevice(DEVICE_ID_1), generateDevice(DEVICE_ID_2));
     final Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), devices);
 
-    accounts.create(account);
+    createAccount(account);
 
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
 
@@ -241,20 +237,20 @@ class AccountsTest {
 
   @Test
   void testRetrieve() {
-    final List<Device> devicesFirst = List.of(generateDevice(1), generateDevice(2));
+    final List<Device> devicesFirst = List.of(generateDevice(DEVICE_ID_1), generateDevice(DEVICE_ID_2));
 
     UUID uuidFirst = UUID.randomUUID();
     UUID pniFirst = UUID.randomUUID();
     Account accountFirst = generateAccount("+14151112222", uuidFirst, pniFirst, devicesFirst);
 
-    final List<Device> devicesSecond = List.of(generateDevice(1), generateDevice(2));
+    final List<Device> devicesSecond = List.of(generateDevice(DEVICE_ID_1), generateDevice(DEVICE_ID_2));
 
     UUID uuidSecond = UUID.randomUUID();
     UUID pniSecond = UUID.randomUUID();
     Account accountSecond = generateAccount("+14152221111", uuidSecond, pniSecond, devicesSecond);
 
-    accounts.create(accountFirst);
-    accounts.create(accountSecond);
+    createAccount(accountFirst);
+    createAccount(accountSecond);
 
     Optional<Account> retrievedFirst = accounts.getByE164("+14151112222");
     Optional<Account> retrievedSecond = accounts.getByE164("+14152221111");
@@ -286,7 +282,7 @@ class AccountsTest {
 
   @Test
   void testRetrieveNoPni() throws JsonProcessingException {
-    final List<Device> devices = List.of(generateDevice(1), generateDevice(2));
+    final List<Device> devices = List.of(generateDevice(DEVICE_ID_1), generateDevice(DEVICE_ID_2));
     final UUID uuid = UUID.randomUUID();
     final Account account = generateAccount("+14151112222", uuid, null, devices);
 
@@ -322,7 +318,7 @@ class AccountsTest {
                   Accounts.ATTR_ACCOUNT_E164, AttributeValues.fromString(account.getNumber()),
                   Accounts.ATTR_ACCOUNT_DATA, AttributeValues.fromByteArray(SystemMapper.jsonMapper().writeValueAsBytes(account)),
                   Accounts.ATTR_VERSION, AttributeValues.fromInt(account.getVersion()),
-                  Accounts.ATTR_CANONICALLY_DISCOVERABLE, AttributeValues.fromBool(account.shouldBeVisibleInDirectory())))
+                  Accounts.ATTR_CANONICALLY_DISCOVERABLE, AttributeValues.fromBool(account.isDiscoverableByPhoneNumber())))
               .build())
           .build();
 
@@ -342,60 +338,185 @@ class AccountsTest {
     verifyStoredState("+14151112222", uuid, null, null, retrieved.get(), account);
   }
 
-  @Test
-  void testOverwrite() {
-    Device device = generateDevice(1);
+  // State before the account is re-registered
+  enum UsernameStatus {
+    NONE,
+    RESERVED,
+    RESERVED_WITH_SAVED_LINK,
+    CONFIRMED
+  }
+
+  @ParameterizedTest
+  @EnumSource(UsernameStatus.class)
+  void reclaimAccountWithNoUsername(UsernameStatus usernameStatus) {
+    Device device = generateDevice(DEVICE_ID_1);
     UUID firstUuid = UUID.randomUUID();
     UUID firstPni = UUID.randomUUID();
     Account account = generateAccount("+14151112222", firstUuid, firstPni, List.of(device));
+    createAccount(account);
 
-    accounts.create(account);
+    final byte[] usernameHash = randomBytes(32);
+    final byte[] encryptedUsername = randomBytes(32);
+    switch (usernameStatus) {
+      case NONE:
+        break;
+      case RESERVED:
+        accounts.reserveUsernameHash(account, randomBytes(32), Duration.ofMinutes(1)).join();
+        break;
+      case RESERVED_WITH_SAVED_LINK:
+        // give the account a username
+        accounts.reserveUsernameHash(account, usernameHash, Duration.ofMinutes(1)).join();
+        accounts.confirmUsernameHash(account, usernameHash, encryptedUsername).join();
 
-    final SecureRandom byteGenerator = new SecureRandom();
-    final byte[] usernameHash = new byte[32];
-    byteGenerator.nextBytes(usernameHash);
-    final byte[] encryptedUsername = new byte[16];
-    byteGenerator.nextBytes(encryptedUsername);
+        // simulate a partially-completed re-reg: we give the account a reclaimable username, but we'll try
+        // re-registering again later in the test case
+        account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
+        reclaimAccount(account);
+        break;
+      case CONFIRMED:
+        accounts.reserveUsernameHash(account, usernameHash, Duration.ofMinutes(1)).join();
+        accounts.confirmUsernameHash(account, usernameHash, encryptedUsername).join();
+        break;
+    }
+
+    Optional<UUID> preservedLink = Optional.ofNullable(account.getUsernameLinkHandle());
+
+    // re-register the account
+    account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
+    reclaimAccount(account);
+
+    // If we had a username link, or we had previously saved a username link from another re-registration, make sure
+    // we preserve it
+    accounts.confirmUsernameHash(account, usernameHash, encryptedUsername).join();
+
+    boolean shouldReuseLink = switch (usernameStatus) {
+      case RESERVED_WITH_SAVED_LINK, CONFIRMED -> true;
+      case NONE, RESERVED -> false;
+    };
+
+    // If we had a reclaimable username, make sure we preserved the link.
+    assertThat(account.getUsernameLinkHandle().equals(preservedLink.orElse(null)))
+        .isEqualTo(shouldReuseLink);
+
+    // in all cases, we should now have usernameHash, usernameLink, and encryptedUsername set
+    assertThat(account.getUsernameHash()).isNotEmpty();
+    assertThat(account.getEncryptedUsername()).isNotEmpty();
+    assertThat(account.getUsernameLinkHandle()).isNotNull();
+    assertThat(account.getReservedUsernameHash()).isEmpty();
+  }
+
+  private void reclaimAccount(final Account reregisteredAccount) {
+    final AccountAlreadyExistsException accountAlreadyExistsException =
+        assertThrows(AccountAlreadyExistsException.class,
+            () -> accounts.create(reregisteredAccount, Collections.emptyList()));
+
+    reregisteredAccount.setUuid(accountAlreadyExistsException.getExistingAccount().getUuid());
+    reregisteredAccount.setNumber(accountAlreadyExistsException.getExistingAccount().getNumber(),
+        accountAlreadyExistsException.getExistingAccount().getPhoneNumberIdentifier());
+
+    assertDoesNotThrow(() -> accounts.reclaimAccount(accountAlreadyExistsException.getExistingAccount(),
+        reregisteredAccount,
+        Collections.emptyList()).toCompletableFuture().join());
+  }
+
+  @Test
+  void testReclaimAccountPreservesFields() {
+    final String e164 = "+14151112222";
+    final UUID existingUuid = UUID.randomUUID();
+    final Account existingAccount =
+        generateAccount(e164, existingUuid, UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
+
+    // the backup credential request and share-set are always preserved across account reclaims
+    existingAccount.setBackupCredentialRequests(TestRandomUtil.nextBytes(32), TestRandomUtil.nextBytes(32));
+    existingAccount.setSvr3ShareSet(TestRandomUtil.nextBytes(100));
+    createAccount(existingAccount);
+    final Account secondAccount =
+        generateAccount(e164, UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
+
+    reclaimAccount(secondAccount);
+
+    final Account reclaimed = accounts.getByAccountIdentifier(existingUuid).get();
+    assertThat(reclaimed.getBackupCredentialRequest(BackupCredentialType.MESSAGES).get())
+        .isEqualTo(existingAccount.getBackupCredentialRequest(BackupCredentialType.MESSAGES).get());
+    assertThat(reclaimed.getBackupCredentialRequest(BackupCredentialType.MEDIA).get())
+        .isEqualTo(existingAccount.getBackupCredentialRequest(BackupCredentialType.MEDIA).get());
+    assertThat(reclaimed.getSvr3ShareSet()).isEqualTo(existingAccount.getSvr3ShareSet());
+  }
+
+  @Test
+  void testReclaimAccount() {
+    final String e164 = "+14151112222";
+    final Device device = generateDevice(DEVICE_ID_1);
+    final UUID existingUuid = UUID.randomUUID();
+    final UUID existingPni = UUID.randomUUID();
+    final Account existingAccount = generateAccount(e164, existingUuid, existingPni, List.of(device));
+
+    createAccount(existingAccount);
+
+    final byte[] usernameHash = randomBytes(32);
+    final byte[] encryptedUsername = randomBytes(16);
 
     // Set up the existing account to have a username hash
-    accounts.confirmUsernameHash(account, usernameHash, encryptedUsername);
+    accounts.confirmUsernameHash(existingAccount, usernameHash, encryptedUsername).join();
+    final UUID usernameLinkHandle = existingAccount.getUsernameLinkHandle();
 
-    verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), usernameHash, account, true);
+    verifyStoredState(e164, existingAccount.getUuid(), existingAccount.getPhoneNumberIdentifier(), usernameHash, existingAccount, true);
 
-    assertPhoneNumberConstraintExists("+14151112222", firstUuid);
-    assertPhoneNumberIdentifierConstraintExists(firstPni, firstUuid);
+    assertPhoneNumberConstraintExists(e164, existingUuid);
+    assertPhoneNumberIdentifierConstraintExists(existingPni, existingUuid);
 
-    accounts.update(account);
+    assertDoesNotThrow(() -> accounts.update(existingAccount));
 
-    UUID secondUuid = UUID.randomUUID();
+    final UUID secondUuid = UUID.randomUUID();
 
-    device = generateDevice(1);
-    account = generateAccount("+14151112222", secondUuid, UUID.randomUUID(), List.of(device));
+    final Device secondDevice = generateDevice(DEVICE_ID_1);
+    final Account secondAccount = generateAccount(e164, secondUuid, UUID.randomUUID(), List.of(secondDevice));
 
-    final boolean freshUser = accounts.create(account);
-    assertThat(freshUser).isFalse();
-    verifyStoredState("+14151112222", firstUuid, firstPni, usernameHash, account, true);
+    reclaimAccount(secondAccount);
 
-    assertPhoneNumberConstraintExists("+14151112222", firstUuid);
-    assertPhoneNumberIdentifierConstraintExists(firstPni, firstUuid);
+    // usernameHash should be unset
+    verifyStoredState("+14151112222", existingUuid, existingPni, null, secondAccount, true);
 
-    device = generateDevice(1);
-    Account invalidAccount = generateAccount("+14151113333", firstUuid, UUID.randomUUID(), List.of(device));
+    // username should become 'reclaimable'
+    Map<String, AttributeValue> item = readAccount(existingUuid);
+    Account result = Accounts.fromItem(item);
+    assertThat(AttributeValues.getUUID(item, Accounts.ATTR_USERNAME_LINK_UUID, null))
+        .isEqualTo(usernameLinkHandle)
+        .isEqualTo(result.getUsernameLinkHandle());
+    assertThat(result.getUsernameHash()).isEmpty();
+    assertThat(result.getEncryptedUsername()).isEmpty();
+    assertArrayEquals(result.getReservedUsernameHash().get(), usernameHash);
 
-    assertThatThrownBy(() -> accounts.create(invalidAccount));
+    // should keep the same usernameLink, now encryptedUsername should be set
+    accounts.confirmUsernameHash(result, usernameHash, encryptedUsername).join();
+    item = readAccount(existingUuid);
+    result = Accounts.fromItem(item);
+    assertThat(AttributeValues.getUUID(item, Accounts.ATTR_USERNAME_LINK_UUID, null))
+        .isEqualTo(usernameLinkHandle)
+        .isEqualTo(result.getUsernameLinkHandle());
+    assertArrayEquals(result.getEncryptedUsername().get(), encryptedUsername);
+    assertArrayEquals(result.getUsernameHash().get(), usernameHash);
+    assertThat(result.getReservedUsernameHash()).isEmpty();
+
+    assertPhoneNumberConstraintExists("+14151112222", existingUuid);
+    assertPhoneNumberIdentifierConstraintExists(existingPni, existingUuid);
+
+    Account invalidAccount = generateAccount("+14151113333", existingUuid, UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
+
+    assertThatThrownBy(() -> createAccount(invalidAccount));
   }
 
   @Test
   void testUpdate() {
-    Device  device  = generateDevice (1                                            );
+    Device device = generateDevice(DEVICE_ID_1);
     Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(device));
 
-    accounts.create(account);
+    createAccount(account);
 
     assertPhoneNumberConstraintExists("+14151112222", account.getUuid());
     assertPhoneNumberIdentifierConstraintExists(account.getPhoneNumberIdentifier(), account.getUuid());
 
-    device.setName("foobar");
+    device.setName("foobar".getBytes(StandardCharsets.UTF_8));
 
     accounts.update(account);
 
@@ -412,7 +533,7 @@ class AccountsTest {
     assertThat(retrieved.isPresent()).isTrue();
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, true);
 
-    device = generateDevice(1);
+    device = generateDevice(DEVICE_ID_1);
     Account unknownAccount = generateAccount("+14151113333", UUID.randomUUID(), UUID.randomUUID(), List.of(device));
 
     assertThatThrownBy(() -> accounts.update(unknownAccount)).isInstanceOfAny(ConditionalCheckFailedException.class);
@@ -440,8 +561,13 @@ class AccountsTest {
 
     final DynamoDbAsyncClient dynamoDbAsyncClient = mock(DynamoDbAsyncClient.class);
     accounts = new Accounts(mock(DynamoDbClient.class),
-        dynamoDbAsyncClient, Tables.ACCOUNTS.tableName(),
-        Tables.NUMBERS.tableName(), Tables.PNI_ASSIGNMENTS.tableName(), Tables.USERNAMES.tableName(), SCAN_PAGE_SIZE);
+        dynamoDbAsyncClient,
+        Tables.ACCOUNTS.tableName(),
+        Tables.NUMBERS.tableName(),
+        Tables.PNI_ASSIGNMENTS.tableName(),
+        Tables.USERNAMES.tableName(),
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
     Exception e = TransactionConflictException.builder().build();
     e = wrapException ? new CompletionException(e) : e;
@@ -455,52 +581,95 @@ class AccountsTest {
   }
 
   @Test
-  void testRetrieveFrom() {
-    List<Account> users = new ArrayList<>();
+  void testUpdateTransactionally() {
+    final Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
 
-    for (int i = 1; i <= 100; i++) {
-      Account account = generateAccount("+1" + String.format("%03d", i), UUID.randomUUID(), UUID.randomUUID());
-      users.add(account);
-      accounts.create(account);
-    }
+    final byte[] deviceName = "device-name".getBytes(StandardCharsets.UTF_8);
 
-    users.sort((account, t1) -> UUIDComparator.staticCompare(account.getUuid(), t1.getUuid()));
+    assertNotEquals(deviceName,
+        accounts.getByAccountIdentifier(account.getUuid()).orElseThrow().getPrimaryDevice().getName());
 
-    AccountCrawlChunk retrieved = accounts.getAllFromStart(10);
-    assertThat(retrieved.getAccounts().size()).isEqualTo(10);
+    assertFalse(DYNAMO_DB_EXTENSION.getDynamoDbClient().getItem(GetItemRequest.builder()
+            .tableName(Tables.CLIENT_RELEASES.tableName())
+            .key(Map.of(
+                ClientReleases.ATTR_PLATFORM, AttributeValues.fromString("test"),
+                ClientReleases.ATTR_VERSION, AttributeValues.fromString("test")
+            ))
+            .build())
+        .hasItem());
 
-    for (int i = 0; i < retrieved.getAccounts().size(); i++) {
-      final Account retrievedAccount = retrieved.getAccounts().get(i);
+    account.getPrimaryDevice().setName(deviceName);
 
-      final Account expectedAccount = users.stream()
-          .filter(account -> account.getUuid().equals(retrievedAccount.getUuid()))
-          .findAny()
-          .orElseThrow();
+    accounts.updateTransactionallyAsync(account, List.of(TransactWriteItem.builder()
+        .put(Put.builder()
+            .tableName(Tables.CLIENT_RELEASES.tableName())
+            .item(Map.of(
+                ClientReleases.ATTR_PLATFORM, AttributeValues.fromString("test"),
+                ClientReleases.ATTR_VERSION, AttributeValues.fromString("test")
+            ))
+            .build())
+        .build())).toCompletableFuture().join();
 
-      verifyStoredState(expectedAccount.getNumber(), expectedAccount.getUuid(), expectedAccount.getPhoneNumberIdentifier(), null, retrievedAccount, expectedAccount);
+    assertArrayEquals(deviceName,
+        accounts.getByAccountIdentifier(account.getUuid()).orElseThrow().getPrimaryDevice().getName());
 
-      users.remove(expectedAccount);
-    }
+    assertTrue(DYNAMO_DB_EXTENSION.getDynamoDbClient().getItem(GetItemRequest.builder()
+            .tableName(Tables.CLIENT_RELEASES.tableName())
+            .key(Map.of(
+                ClientReleases.ATTR_PLATFORM, AttributeValues.fromString("test"),
+                ClientReleases.ATTR_VERSION, AttributeValues.fromString("test")
+            ))
+            .build())
+        .hasItem());
+  }
 
-    for (int j = 0; j < 9; j++) {
-      retrieved = accounts.getAllFrom(retrieved.getLastUuid().orElseThrow(), 10);
-      assertThat(retrieved.getAccounts().size()).isEqualTo(10);
+  @Test
+  void testUpdateTransactionallyContestedLock() {
+    final Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
 
-      for (int i = 0; i < retrieved.getAccounts().size(); i++) {
-        final Account retrievedAccount = retrieved.getAccounts().get(i);
+    account.setVersion(account.getVersion() - 1);
 
-        final Account expectedAccount = users.stream()
-            .filter(account -> account.getUuid().equals(retrievedAccount.getUuid()))
-            .findAny()
-            .orElseThrow();
+    final CompletionException completionException = assertThrows(CompletionException.class,
+        () -> accounts.updateTransactionallyAsync(account, List.of(TransactWriteItem.builder()
+            .put(Put.builder()
+                .tableName(Tables.CLIENT_RELEASES.tableName())
+                .item(Map.of(
+                    ClientReleases.ATTR_PLATFORM, AttributeValues.fromString("test"),
+                    ClientReleases.ATTR_VERSION, AttributeValues.fromString("test")
+                ))
+                .build())
+            .build())).toCompletableFuture().join());
 
-        verifyStoredState(expectedAccount.getNumber(), expectedAccount.getUuid(), expectedAccount.getPhoneNumberIdentifier(), null, retrievedAccount, expectedAccount);
+    assertTrue(completionException.getCause() instanceof ContestedOptimisticLockException);
+  }
 
-        users.remove(expectedAccount);
-      }
-    }
+  @Test
+  void testUpdateTransactionallyWithMockTransactionConflictException() {
+    final DynamoDbAsyncClient dynamoDbAsyncClient = mock(DynamoDbAsyncClient.class);
 
-    assertThat(users).isEmpty();
+    accounts = new Accounts(mock(DynamoDbClient.class),
+        dynamoDbAsyncClient,
+        Tables.ACCOUNTS.tableName(),
+        Tables.NUMBERS.tableName(),
+        Tables.PNI_ASSIGNMENTS.tableName(),
+        Tables.USERNAMES.tableName(),
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
+
+    when(dynamoDbAsyncClient.transactWriteItems(any(TransactWriteItemsRequest.class)))
+        .thenReturn(CompletableFuture.failedFuture(TransactionCanceledException.builder()
+            .cancellationReasons(CancellationReason.builder()
+                .code("TransactionConflict")
+                .build())
+            .build()));
+
+    Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID());
+
+    assertThatThrownBy(() -> accounts.updateTransactionallyAsync(account, Collections.emptyList()).toCompletableFuture().join())
+        .isInstanceOfAny(CompletionException.class)
+        .hasCauseInstanceOf(ContestedOptimisticLockException.class);
   }
 
   @Test
@@ -510,11 +679,11 @@ class AccountsTest {
     for (int i = 1; i <= 100; i++) {
       final Account account = generateAccount("+1" + String.format("%03d", i), UUID.randomUUID(), UUID.randomUUID());
       expectedAccounts.add(account);
-      accounts.create(account);
+      createAccount(account);
     }
 
     final List<Account> retrievedAccounts =
-        accounts.getAll(2, Schedulers.parallel()).sequential().collectList().block();
+        accounts.getAll(2, Schedulers.parallel()).collectList().block();
 
     assertNotNull(retrievedAccounts);
     assertEquals(expectedAccounts.stream().map(Account::getUuid).collect(Collectors.toSet()),
@@ -523,15 +692,17 @@ class AccountsTest {
 
   @Test
   void testDelete() {
-    final Device deletedDevice = generateDevice(1);
+    final Device deletedDevice = generateDevice(DEVICE_ID_1);
     final Account deletedAccount = generateAccount("+14151112222", UUID.randomUUID(),
         UUID.randomUUID(), List.of(deletedDevice));
-    final Device retainedDevice = generateDevice(1);
+    final Device retainedDevice = generateDevice(DEVICE_ID_1);
     final Account retainedAccount = generateAccount("+14151112345", UUID.randomUUID(),
         UUID.randomUUID(), List.of(retainedDevice));
 
-    accounts.create(deletedAccount);
-    accounts.create(retainedAccount);
+    createAccount(deletedAccount);
+    createAccount(retainedAccount);
+
+    assertThat(accounts.findRecentlyDeletedAccountIdentifier(deletedAccount.getNumber())).isEmpty();
 
     assertPhoneNumberConstraintExists("+14151112222", deletedAccount.getUuid());
     assertPhoneNumberIdentifierConstraintExists(deletedAccount.getPhoneNumberIdentifier(), deletedAccount.getUuid());
@@ -541,9 +712,10 @@ class AccountsTest {
     assertThat(accounts.getByAccountIdentifier(deletedAccount.getUuid())).isPresent();
     assertThat(accounts.getByAccountIdentifier(retainedAccount.getUuid())).isPresent();
 
-    accounts.delete(deletedAccount.getUuid());
+    accounts.delete(deletedAccount.getUuid(), Collections.emptyList()).join();
 
     assertThat(accounts.getByAccountIdentifier(deletedAccount.getUuid())).isNotPresent();
+    assertThat(accounts.findRecentlyDeletedAccountIdentifier(deletedAccount.getNumber())).hasValue(deletedAccount.getUuid());
 
     assertPhoneNumberConstraintDoesNotExist(deletedAccount.getNumber());
     assertPhoneNumberIdentifierConstraintDoesNotExist(deletedAccount.getPhoneNumberIdentifier());
@@ -553,9 +725,9 @@ class AccountsTest {
 
     {
       final Account recreatedAccount = generateAccount(deletedAccount.getNumber(), UUID.randomUUID(),
-          UUID.randomUUID(), List.of(generateDevice(1)));
+          UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
 
-      final boolean freshUser = accounts.create(recreatedAccount);
+      final boolean freshUser = createAccount(recreatedAccount);
 
       assertThat(freshUser).isTrue();
       assertThat(accounts.getByAccountIdentifier(recreatedAccount.getUuid())).isPresent();
@@ -569,10 +741,10 @@ class AccountsTest {
 
   @Test
   void testMissing() {
-    Device  device  = generateDevice (1                                            );
+    Device device = generateDevice(DEVICE_ID_1);
     Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(device));
 
-    accounts.create(account);
+    createAccount(account);
 
     Optional<Account> retrieved = accounts.getByE164("+11111111");
     assertThat(retrieved.isPresent()).isFalse();
@@ -586,9 +758,9 @@ class AccountsTest {
     assertThat(accounts.getByAccountIdentifierAsync(UUID.randomUUID()).join()).isEmpty();
 
     final Account account =
-        generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(1)));
+        generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
 
-    accounts.create(account);
+    createAccount(account);
 
     assertThat(accounts.getByAccountIdentifierAsync(account.getUuid()).join()).isPresent();
   }
@@ -598,9 +770,9 @@ class AccountsTest {
     assertThat(accounts.getByPhoneNumberIdentifierAsync(UUID.randomUUID()).join()).isEmpty();
 
     final Account account =
-        generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(1)));
+        generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
 
-    accounts.create(account);
+    createAccount(account);
 
     assertThat(accounts.getByPhoneNumberIdentifierAsync(account.getPhoneNumberIdentifier()).join()).isPresent();
   }
@@ -612,19 +784,19 @@ class AccountsTest {
     assertThat(accounts.getByE164Async(e164).join()).isEmpty();
 
     final Account account =
-        generateAccount(e164, UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(1)));
+        generateAccount(e164, UUID.randomUUID(), UUID.randomUUID(), List.of(generateDevice(DEVICE_ID_1)));
 
-    accounts.create(account);
+    createAccount(account);
 
     assertThat(accounts.getByE164Async(e164).join()).isPresent();
   }
 
   @Test
   void testCanonicallyDiscoverableSet() {
-    Device device = generateDevice(1);
+    Device device = generateDevice(DEVICE_ID_1);
     Account account = generateAccount("+14151112222", UUID.randomUUID(), UUID.randomUUID(), List.of(device));
     account.setDiscoverableByPhoneNumber(false);
-    accounts.create(account);
+    createAccount(account);
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, false);
     account.setDiscoverableByPhoneNumber(true);
     accounts.update(account);
@@ -634,18 +806,20 @@ class AccountsTest {
     verifyStoredState("+14151112222", account.getUuid(), account.getPhoneNumberIdentifier(), null, account, false);
   }
 
-  @Test
-  public void testChangeNumber() {
+  @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
+  @ParameterizedTest
+  @MethodSource
+  public void testChangeNumber(final Optional<UUID> maybeDisplacedAccountIdentifier) {
     final String originalNumber = "+14151112222";
     final String targetNumber = "+14151113333";
 
     final UUID originalPni = UUID.randomUUID();
     final UUID targetPni = UUID.randomUUID();
 
-    final Device device = generateDevice(1);
+    final Device device = generateDevice(DEVICE_ID_1);
     final Account account = generateAccount(originalNumber, UUID.randomUUID(), originalPni, List.of(device));
 
-    accounts.create(account);
+    createAccount(account);
 
     assertThat(accounts.getByPhoneNumberIdentifier(originalPni)).isPresent();
 
@@ -659,7 +833,7 @@ class AccountsTest {
       verifyStoredState(originalNumber, account.getUuid(), account.getPhoneNumberIdentifier(), null, retrieved.get(), account);
     }
 
-    accounts.changeNumber(account, targetNumber, targetPni);
+    accounts.changeNumber(account, targetNumber, targetPni, maybeDisplacedAccountIdentifier, Collections.emptyList());
 
     assertThat(accounts.getByE164(originalNumber)).isEmpty();
     assertThat(accounts.getByAccountIdentifier(originalPni)).isEmpty();
@@ -678,6 +852,15 @@ class AccountsTest {
       assertThat(retrieved.get().getPhoneNumberIdentifier()).isEqualTo(targetPni);
       assertThat(accounts.getByPhoneNumberIdentifier(targetPni)).isPresent();
     }
+
+    assertThat(accounts.findRecentlyDeletedAccountIdentifier(originalNumber)).isEqualTo(maybeDisplacedAccountIdentifier);
+  }
+
+  private static Stream<Arguments> testChangeNumber() {
+    return Stream.of(
+        Arguments.of(Optional.empty()),
+        Arguments.of(Optional.of(UUID.randomUUID()))
+    );
   }
 
   @Test
@@ -688,16 +871,16 @@ class AccountsTest {
     final UUID originalPni = UUID.randomUUID();
     final UUID targetPni = UUID.randomUUID();
 
-    final Device existingDevice = generateDevice(1);
+    final Device existingDevice = generateDevice(DEVICE_ID_1);
     final Account existingAccount = generateAccount(targetNumber, UUID.randomUUID(), targetPni, List.of(existingDevice));
 
-    final Device device = generateDevice(1);
+    final Device device = generateDevice(DEVICE_ID_1);
     final Account account = generateAccount(originalNumber, UUID.randomUUID(), originalPni, List.of(device));
 
-    accounts.create(account);
-    accounts.create(existingAccount);
+    createAccount(account);
+    createAccount(existingAccount);
 
-    assertThrows(TransactionCanceledException.class, () -> accounts.changeNumber(account, targetNumber, targetPni));
+    assertThrows(TransactionCanceledException.class, () -> accounts.changeNumber(account, targetNumber, targetPni, Optional.of(existingAccount.getUuid()), Collections.emptyList()));
 
     assertPhoneNumberConstraintExists(originalNumber, account.getUuid());
     assertPhoneNumberIdentifierConstraintExists(originalPni, account.getUuid());
@@ -710,10 +893,10 @@ class AccountsTest {
     final String originalNumber = "+14151112222";
     final String targetNumber = "+14151113333";
 
-    final Device device = generateDevice(1);
+    final Device device = generateDevice(DEVICE_ID_1);
     final Account account = generateAccount(originalNumber, UUID.randomUUID(), UUID.randomUUID(), List.of(device));
 
-    accounts.create(account);
+    createAccount(account);
 
     final UUID existingAccountIdentifier = UUID.randomUUID();
     final UUID existingPhoneNumberIdentifier = UUID.randomUUID();
@@ -733,97 +916,221 @@ class AccountsTest {
             Map.of(":uuid", AttributeValues.fromUUID(existingAccountIdentifier)))
         .build());
 
-    assertThrows(TransactionCanceledException.class, () -> accounts.changeNumber(account, targetNumber, existingPhoneNumberIdentifier));
+    assertThrows(TransactionCanceledException.class, () -> accounts.changeNumber(account, targetNumber, existingPhoneNumberIdentifier, Optional.empty(), Collections.emptyList()));
+  }
+
+  @Test
+  public void testChangeNumberContestedOptimisticLock() {
+    final String originalNumber = "+14151112222";
+    final String targetNumber = "+14151113333";
+
+    final UUID originalPni = UUID.randomUUID();
+    final UUID targetPni = UUID.randomUUID();
+
+    final Device device = generateDevice(DEVICE_ID_1);
+    final Account firstAccountInstance = generateAccount(originalNumber, UUID.randomUUID(), originalPni,
+        List.of(device));
+
+    createAccount(firstAccountInstance);
+
+    final Account secondAccountInstance = accounts.getByAccountIdentifier(firstAccountInstance.getUuid()).orElseThrow();
+
+    // update via the first instance, which will update the version
+    firstAccountInstance.setCurrentProfileVersion("1");
+    accounts.update(firstAccountInstance);
+
+    assertThrows(ContestedOptimisticLockException.class,
+        () -> accounts.changeNumber(secondAccountInstance, targetNumber, targetPni, Optional.empty(),
+            Collections.emptyList()), "Second account instance has stale version");
+
+    final Account refreshedAccountInstance = accounts.getByAccountIdentifier(firstAccountInstance.getUuid())
+        .orElseThrow();
+    accounts.changeNumber(refreshedAccountInstance, targetNumber, targetPni, Optional.empty(),
+        Collections.emptyList());
+
+    assertPhoneNumberConstraintDoesNotExist(originalNumber);
+    assertPhoneNumberIdentifierConstraintDoesNotExist(originalPni);
+    assertPhoneNumberConstraintExists(targetNumber, firstAccountInstance.getUuid());
+    assertPhoneNumberIdentifierConstraintExists(targetPni, firstAccountInstance.getUuid());
   }
 
   @Test
   void testSwitchUsernameHashes() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
+    createAccount(account);
 
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1)).isEmpty();
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
 
-    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1));
-    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
     final UUID oldHandle = account.getUsernameLinkHandle();
-    
-    {
-      final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_1);
 
+    {
+      final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_1).join();
       verifyStoredState(account.getNumber(), account.getUuid(), account.getPhoneNumberIdentifier(), USERNAME_HASH_1, maybeAccount.orElseThrow(), account);
-      final Optional<Account> maybeAccount2 = accounts.getByUsernameLinkHandle(oldHandle);
+
+      final Optional<Account> maybeAccount2 = accounts.getByUsernameLinkHandle(oldHandle).join();
       verifyStoredState(account.getNumber(), account.getUuid(), account.getPhoneNumberIdentifier(), USERNAME_HASH_1, maybeAccount2.orElseThrow(), account);
     }
 
-    accounts.reserveUsernameHash(account, USERNAME_HASH_2, Duration.ofDays(1));
-    accounts.confirmUsernameHash(account, USERNAME_HASH_2, ENCRYPTED_USERNAME_2);
+    accounts.reserveUsernameHash(account, USERNAME_HASH_2, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_2, ENCRYPTED_USERNAME_2).join();
     final UUID newHandle = account.getUsernameLinkHandle();
 
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1)).isEmpty();
-    assertThat(DYNAMO_DB_EXTENSION.getDynamoDbClient()
-        .getItem(GetItemRequest.builder()
-            .tableName(Tables.USERNAMES.tableName())
-            .key(Map.of(Accounts.ATTR_USERNAME_HASH, AttributeValues.fromByteArray(USERNAME_HASH_1)))
-            .build())
-        .item()).isEmpty();
-    assertThat(accounts.getByUsernameLinkHandle(oldHandle)).isEmpty();
+    // switching usernames should put a hold on our original username
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
+    assertThat(getUsernameConstraintTableItem(USERNAME_HASH_1)).containsExactlyInAnyOrderEntriesOf(Map.of(
+        Accounts.UsernameTable.KEY_USERNAME_HASH, AttributeValues.b(USERNAME_HASH_1),
+        Accounts.UsernameTable.ATTR_ACCOUNT_UUID, AttributeValues.b(account.getUuid()),
+        Accounts.UsernameTable.ATTR_CONFIRMED, AttributeValues.fromBool(false),
+        Accounts.UsernameTable.ATTR_TTL,
+        AttributeValues.n(clock.instant().plus(Accounts.USERNAME_HOLD_DURATION).getEpochSecond())));
+    assertThat(accounts.getByUsernameLinkHandle(oldHandle).join()).isEmpty();
 
     {
-      final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_2);
+      final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_2).join();
 
       assertThat(maybeAccount).isPresent();
       verifyStoredState(account.getNumber(), account.getUuid(), account.getPhoneNumberIdentifier(),
           USERNAME_HASH_2, maybeAccount.get(), account);
-      final Optional<Account> maybeAccount2 = accounts.getByUsernameLinkHandle(newHandle);
+      final Optional<Account> maybeAccount2 = accounts.getByUsernameLinkHandle(newHandle).join();
       verifyStoredState(account.getNumber(), account.getUuid(), account.getPhoneNumberIdentifier(),
           USERNAME_HASH_2, maybeAccount2.get(), account);
     }
   }
 
   @Test
-  void testUsernameHashConflict() {
+  void testUsernameHashNotAvailable() {
     final Account firstAccount = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
     final Account secondAccount = generateAccount("+18005559876", UUID.randomUUID(), UUID.randomUUID());
 
-    accounts.create(firstAccount);
-    accounts.create(secondAccount);
+    createAccount(firstAccount);
+    createAccount(secondAccount);
 
     // first account reserves and confirms username hash
     assertThatNoException().isThrownBy(() -> {
-      accounts.reserveUsernameHash(firstAccount, USERNAME_HASH_1, Duration.ofDays(1));
-      accounts.confirmUsernameHash(firstAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
+      accounts.reserveUsernameHash(firstAccount, USERNAME_HASH_1, Duration.ofDays(1)).join();
+      accounts.confirmUsernameHash(firstAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
     });
 
-    final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_1);
+    final Optional<Account> maybeAccount = accounts.getByUsernameHash(USERNAME_HASH_1).join();
 
     assertThat(maybeAccount).isPresent();
     verifyStoredState(firstAccount.getNumber(), firstAccount.getUuid(), firstAccount.getPhoneNumberIdentifier(), USERNAME_HASH_1, maybeAccount.get(), firstAccount);
 
     // throw an error if second account tries to reserve or confirm the same username hash
-    assertThatExceptionOfType(ContestedOptimisticLockException.class)
-        .isThrownBy(() -> accounts.reserveUsernameHash(secondAccount, USERNAME_HASH_1, Duration.ofDays(1)));
-    assertThatExceptionOfType(ContestedOptimisticLockException.class)
-        .isThrownBy(() -> accounts.confirmUsernameHash(secondAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(secondAccount, USERNAME_HASH_1, Duration.ofDays(1)));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.confirmUsernameHash(secondAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
 
     // throw an error if first account tries to reserve or confirm the username hash that it has already confirmed
-    assertThatExceptionOfType(ContestedOptimisticLockException.class)
-        .isThrownBy(() -> accounts.reserveUsernameHash(firstAccount, USERNAME_HASH_1, Duration.ofDays(1)));
-    assertThatExceptionOfType(ContestedOptimisticLockException.class)
-        .isThrownBy(() -> accounts.confirmUsernameHash(firstAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(firstAccount, USERNAME_HASH_1, Duration.ofDays(1)));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.confirmUsernameHash(firstAccount, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
 
     assertThat(secondAccount.getReservedUsernameHash()).isEmpty();
     assertThat(secondAccount.getUsernameHash()).isEmpty();
   }
 
+  @ParameterizedTest
+  @MethodSource
+  void testReserveUsernameHashTransactionConflict(final Optional<String> constraintCancellationString,
+      final Optional<String> accountsCancellationString,
+      final Class<Exception> expectedException) {
+    final DynamoDbAsyncClient dbAsyncClient = mock(DynamoDbAsyncClient.class);
+
+    accounts = new Accounts(mock(DynamoDbClient.class),
+        dbAsyncClient,
+        Tables.ACCOUNTS.tableName(),
+        Tables.NUMBERS.tableName(),
+        Tables.PNI_ASSIGNMENTS.tableName(),
+        Tables.USERNAMES.tableName(),
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
+    final Account account = generateAccount("+14155551111", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    final CancellationReason constraintCancellationReason = constraintCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    final CancellationReason accountsCancellationReason = accountsCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    when(dbAsyncClient.transactWriteItems(any(TransactWriteItemsRequest.class)))
+        .thenReturn(CompletableFuture.failedFuture(TransactionCanceledException.builder()
+            .cancellationReasons(constraintCancellationReason, accountsCancellationReason)
+            .build()));
+
+    CompletableFutureTestUtil.assertFailsWithCause(expectedException,
+        accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)));
+  }
+
+  private static Stream<Arguments> testReserveUsernameHashTransactionConflict() {
+    return Stream.of(
+        Arguments.of(Optional.of("TransactionConflict"), Optional.empty(), ContestedOptimisticLockException.class),
+        Arguments.of(Optional.empty(), Optional.of("TransactionConflict"), ContestedOptimisticLockException.class),
+        Arguments.of(Optional.of("ConditionalCheckFailed"), Optional.of("TransactionConflict"), UsernameHashNotAvailableException.class)
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void testConfirmUsernameHashTransactionConflict(final Optional<String> constraintCancellationString,
+      final Optional<String> accountsCancellationString,
+      final Class<Exception> expectedException) {
+    final DynamoDbAsyncClient dbAsyncClient = mock(DynamoDbAsyncClient.class);
+
+    accounts = new Accounts(mock(DynamoDbClient.class),
+        dbAsyncClient,
+        Tables.ACCOUNTS.tableName(),
+        Tables.NUMBERS.tableName(),
+        Tables.PNI_ASSIGNMENTS.tableName(),
+        Tables.USERNAMES.tableName(),
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
+    final Account account = generateAccount("+14155551111", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    final CancellationReason constraintCancellationReason = constraintCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    final CancellationReason accountsCancellationReason = accountsCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    when(dbAsyncClient.transactWriteItems(any(TransactWriteItemsRequest.class)))
+        .thenReturn(CompletableFuture.failedFuture(TransactionCanceledException.builder()
+            .cancellationReasons(constraintCancellationReason,
+                accountsCancellationReason,
+                CancellationReason.builder().build())
+            .build()));
+
+    CompletableFutureTestUtil.assertFailsWithCause(expectedException,
+        accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+  }
+
+  private static Stream<Arguments> testConfirmUsernameHashTransactionConflict() {
+    return Stream.of(
+        Arguments.of(Optional.of("TransactionConflict"), Optional.empty(), ContestedOptimisticLockException.class),
+        Arguments.of(Optional.empty(), Optional.of("TransactionConflict"), ContestedOptimisticLockException.class),
+        Arguments.of(Optional.of("ConditionalCheckFailed"), Optional.of("TransactionConflict"), UsernameHashNotAvailableException.class)
+    );
+  }
+
   @Test
   void testConfirmUsernameHashVersionMismatch() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
-    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1));
+    createAccount(account);
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
     account.setVersion(account.getVersion() + 77);
 
-    assertThatExceptionOfType(ContestedOptimisticLockException.class)
-        .isThrownBy(() -> accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
 
     assertThat(account.getUsernameHash()).isEmpty();
   }
@@ -831,170 +1138,458 @@ class AccountsTest {
   @Test
   void testClearUsername() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
+    createAccount(account);
 
-    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1));
-    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1)).isPresent();
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isPresent();
 
-    accounts.clearUsernameHash(account);
+    accounts.clearUsernameHash(account).join();
 
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1)).isEmpty();
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
     assertThat(accounts.getByAccountIdentifier(account.getUuid()))
-        .hasValueSatisfying(clearedAccount -> assertThat(clearedAccount.getUsernameHash()).isEmpty());
+        .hasValueSatisfying(clearedAccount -> {
+          assertThat(clearedAccount.getUsernameHash()).isEmpty();
+          assertThat(clearedAccount.getUsernameLinkHandle()).isNull();
+          assertThat(clearedAccount.getEncryptedUsername().isEmpty());
+        });
   }
 
   @Test
   void testClearUsernameNoUsername() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
+    createAccount(account);
 
-    assertThatNoException().isThrownBy(() -> accounts.clearUsernameHash(account));
+    assertThatNoException().isThrownBy(() -> accounts.clearUsernameHash(account).join());
   }
 
   @Test
   void testClearUsernameVersionMismatch() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
+    createAccount(account);
 
-    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1));
-    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
 
     account.setVersion(account.getVersion() + 12);
 
-    assertThatExceptionOfType(ContestedOptimisticLockException.class).isThrownBy(() -> accounts.clearUsernameHash(account));
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.clearUsernameHash(account));
 
     assertArrayEquals(account.getUsernameHash().orElseThrow(), USERNAME_HASH_1);
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void testClearUsernameTransactionConflict(final Optional<String> constraintCancellationString,
+      final Optional<String> accountsCancellationString) {
+    final DynamoDbAsyncClient dbAsyncClient = mock(DynamoDbAsyncClient.class);
+
+    accounts = new Accounts(mock(DynamoDbClient.class),
+        dbAsyncClient,
+        Tables.ACCOUNTS.tableName(),
+        Tables.NUMBERS.tableName(),
+        Tables.PNI_ASSIGNMENTS.tableName(),
+        Tables.USERNAMES.tableName(),
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
+
+    final Account account = generateAccount("+14155551111", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    when(dbAsyncClient.transactWriteItems(any(TransactWriteItemsRequest.class)))
+        .thenReturn(CompletableFuture.completedFuture(mock(TransactWriteItemsResponse.class)));
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    final CancellationReason constraintCancellationReason = constraintCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    final CancellationReason accountsCancellationReason = accountsCancellationString.map(
+        reason -> CancellationReason.builder().code(reason).build()
+    ).orElse(CancellationReason.builder().build());
+
+    when(dbAsyncClient.transactWriteItems(any(TransactWriteItemsRequest.class)))
+        .thenReturn(CompletableFuture.failedFuture(TransactionCanceledException.builder()
+            .cancellationReasons(accountsCancellationReason, constraintCancellationReason)
+            .build()));
+
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.clearUsernameHash(account));
+
+    assertArrayEquals(account.getUsernameHash().orElseThrow(), USERNAME_HASH_1);
+  }
+
+  private static Stream<Arguments> testClearUsernameTransactionConflict() {
+    return Stream.of(
+        Arguments.of(Optional.empty(), Optional.of("TransactionConflict"), ContestedOptimisticLockException.class),
+        Arguments.of(Optional.of("TransactionConflict"), Optional.empty(), ContestedOptimisticLockException.class)
+    );
   }
 
   @Test
   void testReservedUsernameHash() {
     final Account account1 = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account1);
+    createAccount(account1);
     final Account account2 = generateAccount("+18005552222", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account2);
+    createAccount(account2);
 
-    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(1));
+    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(1)).join();
     assertArrayEquals(account1.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
     assertThat(account1.getUsernameHash()).isEmpty();
 
     // account 2 shouldn't be able to reserve or confirm the same username hash
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)));
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1)).isEmpty();
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
 
-    accounts.confirmUsernameHash(account1, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
+    accounts.confirmUsernameHash(account1, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
     assertThat(account1.getReservedUsernameHash()).isEmpty();
     assertArrayEquals(account1.getUsernameHash().orElseThrow(), USERNAME_HASH_1);
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).get().getUuid()).isEqualTo(account1.getUuid());
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join().get().getUuid()).isEqualTo(account1.getUuid());
 
-    final Map<String, AttributeValue> usernameConstraintRecord = DYNAMO_DB_EXTENSION.getDynamoDbClient()
-        .getItem(GetItemRequest.builder()
-            .tableName(Tables.USERNAMES.tableName())
-            .key(Map.of(Accounts.ATTR_USERNAME_HASH, AttributeValues.fromByteArray(USERNAME_HASH_1)))
-            .build())
-        .item();
+    final Map<String, AttributeValue> usernameConstraintRecord = getUsernameConstraintTableItem(USERNAME_HASH_1);
 
-    assertThat(usernameConstraintRecord).containsKey(Accounts.ATTR_USERNAME_HASH);
-    assertThat(usernameConstraintRecord).doesNotContainKey(Accounts.ATTR_TTL);
+    assertThat(usernameConstraintRecord).containsKey(Accounts.UsernameTable.KEY_USERNAME_HASH);
+    assertThat(usernameConstraintRecord).doesNotContainKey(Accounts.UsernameTable.ATTR_TTL);
   }
 
   @Test
-  void testUsernameHashAvailable() {
-    final Account account1 = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account1);
+  void switchBetweenReservedUsernameHashes() {
+    final Account account = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
 
-    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(1));
-    assertThat(accounts.usernameHashAvailable(USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.empty(), USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.of(UUID.randomUUID()), USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.of(account1.getUuid()), USERNAME_HASH_1)).isTrue();
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    assertArrayEquals(account.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
+    assertThat(account.getUsernameHash()).isEmpty();
 
-    accounts.confirmUsernameHash(account1, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
-    assertThat(accounts.usernameHashAvailable(USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.empty(), USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.of(UUID.randomUUID()), USERNAME_HASH_1)).isFalse();
-    assertThat(accounts.usernameHashAvailable(Optional.of(account1.getUuid()), USERNAME_HASH_1)).isFalse();
+    accounts.reserveUsernameHash(account, USERNAME_HASH_2, Duration.ofDays(1)).join();
+    assertArrayEquals(account.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_2);
+    assertThat(account.getUsernameHash()).isEmpty();
+
+    final Map<String, AttributeValue> usernameConstraintRecord1 = getUsernameConstraintTableItem(USERNAME_HASH_1);
+    final Map<String, AttributeValue> usernameConstraintRecord2 = getUsernameConstraintTableItem(USERNAME_HASH_2);
+    assertThat(usernameConstraintRecord1).containsKey(Accounts.UsernameTable.KEY_USERNAME_HASH);
+    assertThat(usernameConstraintRecord2).containsKey(Accounts.UsernameTable.KEY_USERNAME_HASH);
+    assertThat(usernameConstraintRecord1).containsKey(Accounts.UsernameTable.ATTR_TTL);
+    assertThat(usernameConstraintRecord2).containsKey(Accounts.UsernameTable.ATTR_TTL);
+
+    clock.pin(Instant.EPOCH.plus(Duration.ofMinutes(1)));
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    assertArrayEquals(account.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
+    assertThat(account.getUsernameHash()).isEmpty();
+
+    final Map<String, AttributeValue> newUsernameConstraintRecord1 = getUsernameConstraintTableItem(USERNAME_HASH_1);
+    assertThat(newUsernameConstraintRecord1).containsKey(Accounts.UsernameTable.KEY_USERNAME_HASH);
+    assertThat(newUsernameConstraintRecord1).containsKey(Accounts.UsernameTable.ATTR_TTL);
+    assertThat(usernameConstraintRecord1.get(Accounts.UsernameTable.ATTR_TTL))
+        .isNotEqualTo(newUsernameConstraintRecord1.get(Accounts.UsernameTable.ATTR_TTL));
+  }
+
+  @Test
+  void reserveOwnConfirmedUsername() {
+    final Account account = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    assertArrayEquals(account.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
+    assertThat(account.getUsernameHash()).isEmpty();
+    assertThat(getUsernameConstraintTableItem(USERNAME_HASH_1)).containsKey(Accounts.UsernameTable.ATTR_TTL);
+
+
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+    assertThat(account.getReservedUsernameHash()).isEmpty();
+    assertArrayEquals(account.getUsernameHash().orElseThrow(), USERNAME_HASH_1);
+    assertThat(getUsernameConstraintTableItem(USERNAME_HASH_1)).doesNotContainKey(Accounts.UsernameTable.ATTR_TTL);
+
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)));
+    assertThat(account.getReservedUsernameHash()).isEmpty();
+    assertArrayEquals(account.getUsernameHash().orElseThrow(), USERNAME_HASH_1);
+    assertThat(getUsernameConstraintTableItem(USERNAME_HASH_1)).containsKey(Accounts.UsernameTable.KEY_USERNAME_HASH);
+    assertThat(getUsernameConstraintTableItem(USERNAME_HASH_1)).doesNotContainKey(Accounts.UsernameTable.ATTR_TTL);
   }
 
   @Test
   void testConfirmReservedUsernameHashWrongAccountUuid() {
     final Account account1 = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account1);
+    createAccount(account1);
     final Account account2 = generateAccount("+18005552222", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account2);
+    createAccount(account2);
 
-    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(1));
+    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(1)).join();
     assertArrayEquals(account1.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
     assertThat(account1.getUsernameHash()).isEmpty();
 
     // only account1 should be able to confirm the reserved hash
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
   }
 
   @Test
   void testConfirmExpiredReservedUsernameHash() {
     final Account account1 = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account1);
+    createAccount(account1);
     final Account account2 = generateAccount("+18005552222", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account2);
+    createAccount(account2);
 
-    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(2));
-
-    Runnable runnable = () -> accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1));
+    accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(2)).join();
 
     for (int i = 0; i <= 2; i++) {
       clock.pin(Instant.EPOCH.plus(Duration.ofDays(i)));
-      assertThrows(ContestedOptimisticLockException.class, runnable::run);
+      CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+          accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)));
     }
 
     // after 2 days, can reserve and confirm the hash
     clock.pin(Instant.EPOCH.plus(Duration.ofDays(2)).plus(Duration.ofSeconds(1)));
-    runnable.run();
+    accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)).join();
     assertEquals(account2.getReservedUsernameHash().orElseThrow(), USERNAME_HASH_1);
 
-    accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1);
+    accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
 
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(2)));
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.confirmUsernameHash(account1, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
-    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).get().getUuid()).isEqualTo(account2.getUuid());
-  }
-
-  @Test
-  void testRetryReserveUsernameHash() {
-    final Account account = generateAccount("+18005551111", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
-    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(2));
-
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(2)),
-        "Shouldn't be able to re-reserve same username hash (would extend ttl)");
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(account1, USERNAME_HASH_1, Duration.ofDays(2)));
+    CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+        accounts.confirmUsernameHash(account1, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join().get().getUuid()).isEqualTo(account2.getUuid());
   }
 
   @Test
   void testReserveConfirmUsernameHashVersionConflict() {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    accounts.create(account);
+    createAccount(account);
     account.setVersion(account.getVersion() + 12);
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)));
-    assertThrows(ContestedOptimisticLockException.class,
-        () -> accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)));
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1));
     assertThat(account.getReservedUsernameHash()).isEmpty();
     assertThat(account.getUsernameHash()).isEmpty();
   }
 
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void testRemoveOldestHold(boolean clearUsername) {
+    Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    final List<byte[]> usernames = IntStream.range(0, 7).mapToObj(i -> TestRandomUtil.nextBytes(32)).toList();
+    final ArrayDeque<byte[]> expectedHolds = new ArrayDeque<>();
+    expectedHolds.add(USERNAME_HASH_1);
+
+    for (byte[] username : usernames) {
+      accounts.reserveUsernameHash(account, username, Duration.ofDays(1)).join();
+      accounts.confirmUsernameHash(account, username, ENCRYPTED_USERNAME_1).join();
+      assertThat(accounts.getByUsernameHash(username).join()).isPresent();
+
+      final Account read = accounts.getByAccountIdentifier(account.getUuid()).orElseThrow();
+      assertThat(read.getUsernameHolds().stream().map(Account.UsernameHold::usernameHash).toList())
+          .containsExactlyElementsOf(expectedHolds);
+
+      expectedHolds.add(username);
+      if (expectedHolds.size() == Accounts.MAX_USERNAME_HOLDS + 1) {
+        expectedHolds.pop();
+      }
+
+      // clearing the username adds a hold, but the subsequent confirm in the next iteration should add the same hold
+      // (should be a noop) so we don't need to touch expectedHolds
+      if (clearUsername) {
+        accounts.clearUsernameHash(account).join();
+      }
+    }
+
+
+    final Account account2 = generateAccount("+18005554321", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account2);
+
+    // someone else should be able to get any of the usernames except the held usernames (MAX_HOLDS) +1 for the username
+    // currently held by the other account if we didn't clear it
+    final int numFree = usernames.size() - Accounts.MAX_USERNAME_HOLDS - (clearUsername ? 0 : 1);
+    final List<byte[]> freeUsernames = usernames.subList(0, numFree);
+    final List<byte[]> heldUsernames = usernames.subList(numFree, usernames.size());
+    for (byte[] username : freeUsernames) {
+      assertDoesNotThrow(() ->
+          accounts.reserveUsernameHash(account2, username, Duration.ofDays(2)).join());
+    }
+    for (byte[] username : heldUsernames) {
+      CompletableFutureTestUtil.assertFailsWithCause(UsernameHashNotAvailableException.class,
+          accounts.reserveUsernameHash(account2, username, Duration.ofDays(2)));
+    }
+  }
+
+  @Test
+  void testHoldUsername() {
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    accounts.clearUsernameHash(account).join();
+
+    Account account2 = generateAccount("+18005554321", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account2);
+    CompletableFutureTestUtil.assertFailsWithCause(
+        UsernameHashNotAvailableException.class,
+        accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)),
+        "account2 should not be able reserve username held by account");
+
+    // but we should be able to get it back
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+  }
+
+  @Test
+  void testNoHoldsBarred() {
+    // should be able to reserve all MAX_HOLDS usernames
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+    final List<byte[]> usernames = IntStream.range(0, Accounts.MAX_USERNAME_HOLDS + 1)
+        .mapToObj(i -> TestRandomUtil.nextBytes(32))
+        .toList();
+    for (byte[] username : usernames) {
+      accounts.reserveUsernameHash(account, username, Duration.ofDays(1)).join();
+      accounts.confirmUsernameHash(account, username, ENCRYPTED_USERNAME_1).join();
+    }
+
+    // someone else shouldn't be able to get any of our holds
+    Account account2 = generateAccount("+18005554321", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account2);
+    for (byte[] username : usernames) {
+      CompletableFutureTestUtil.assertFailsWithCause(
+          UsernameHashNotAvailableException.class,
+          accounts.reserveUsernameHash(account2, username, Duration.ofDays(1)),
+          "account2 should not be able reserve username held by account");
+    }
+
+    // once the hold expires it's fine though
+    clock.pin(Instant.EPOCH.plus(Accounts.USERNAME_HOLD_DURATION).plus(Duration.ofSeconds(1)));
+    accounts.reserveUsernameHash(account2, usernames.get(0), Duration.ofDays(1)).join();
+
+    // if account1 modifies their username, we should also clear out the old holds, leaving only their newly added hold
+    accounts.clearUsernameHash(account).join();
+    assertThat(account.getUsernameHolds().stream().map(Account.UsernameHold::usernameHash))
+        .containsExactly(usernames.getLast());
+  }
+
+  @Test
+  public void testCannotRemoveHold() {
+    // Tests the case where we are trying to remove a hold we think we have, but it turns out we've already lost it.
+    // This means that the Account record an account has a hold on a particular username, but that hold is held by
+    // someone else in the username table. This can happen when the hold TTL expires while we are performing the update
+    // operation that attempts to remove the hold, and another user swoops in and takes the held username. In this
+    // case, a simple retry should let us check the clock again and notice that our hold in our account has expired.
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_2, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_2, ENCRYPTED_USERNAME_1).join();
+
+    // Now we have a hold on username_hash_1. Simulate a race where the TTL on username_hash_1 expires, and someone
+    // else picks up the username by going forward and then back in time
+    Account account2 = generateAccount("+18005554321", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account2);
+    clock.pin(Instant.EPOCH.plus(Accounts.USERNAME_HOLD_DURATION).plus(Duration.ofSeconds(1)));
+    accounts.reserveUsernameHash(account2, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account2, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    clock.pin(Instant.EPOCH);
+    // already have 1 hold, should be able to get to MAX_HOLDS without a problem
+    for (int i = 1; i < Accounts.MAX_USERNAME_HOLDS; i++) {
+      accounts.reserveUsernameHash(account, TestRandomUtil.nextBytes(32), Duration.ofDays(1)).join();
+      accounts.confirmUsernameHash(account, TestRandomUtil.nextBytes(32), ENCRYPTED_USERNAME_1).join();
+    }
+
+    accounts.reserveUsernameHash(account, TestRandomUtil.nextBytes(32), Duration.ofDays(1)).join();
+    // Should fail, because we cannot remove our hold on USERNAME_HASH_1
+    CompletableFutureTestUtil.assertFailsWithCause(ContestedOptimisticLockException.class,
+        accounts.confirmUsernameHash(account, TestRandomUtil.nextBytes(32), ENCRYPTED_USERNAME_1));
+
+    // Should now pass once we realize our hold's TTL is over
+    clock.pin(Instant.EPOCH.plus(Accounts.USERNAME_HOLD_DURATION).plus(Duration.ofSeconds(1)));
+    accounts.confirmUsernameHash(account, TestRandomUtil.nextBytes(32), ENCRYPTED_USERNAME_1).join();
+  }
+
+  @Test
+  void testDeduplicateHoldsOnSwappedUsernames() {
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    final Consumer<byte[]> assertSingleHold = (byte[] usernameToCheck) -> {
+      // our account should have exactly one hold for the username
+      assertThat(account.getUsernameHolds().stream().map(Account.UsernameHold::usernameHash).toList())
+          .containsExactly(usernameToCheck);
+
+      // the username should be reserved for USERNAME_HOLD_DURATION (a re-reservation shouldn't reduce our expiration to
+      // the provided reservation TTL)
+      assertThat(
+          AttributeValues.getLong(getUsernameConstraintTableItem(usernameToCheck), Accounts.UsernameTable.ATTR_TTL, 0L))
+          .isEqualTo(Accounts.USERNAME_HOLD_DURATION.getSeconds());
+    };
+
+    // Swap back and forth between username 1 and 2.  Username hashes shouldn't reappear in our holds if we already have
+    // a hold
+    for (int i = 0; i < 5; i++) {
+      accounts.reserveUsernameHash(account, USERNAME_HASH_2, Duration.ofSeconds(1)).join();
+      accounts.confirmUsernameHash(account, USERNAME_HASH_2, ENCRYPTED_USERNAME_1).join();
+      assertSingleHold.accept(USERNAME_HASH_1);
+
+      accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofSeconds(1)).join();
+      accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+      assertSingleHold.accept(USERNAME_HASH_2);
+    }
+  }
+
+  @Test
+  void testRemoveHoldAfterConfirm() {
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+    final List<byte[]> usernames = IntStream.range(0, Accounts.MAX_USERNAME_HOLDS)
+        .mapToObj(i -> TestRandomUtil.nextBytes(32)).toList();
+    for (byte[] username : usernames) {
+      accounts.reserveUsernameHash(account, username, Duration.ofDays(1)).join();
+      accounts.confirmUsernameHash(account, username, ENCRYPTED_USERNAME_1).join();
+    }
+
+    int holdToRereserve = (Accounts.MAX_USERNAME_HOLDS / 2) - 1;
+
+    // should have MAX_HOLDS - 1 holds (everything in usernames except the last username, which is our current)
+    assertThat(account.getUsernameHolds().stream().map(Account.UsernameHold::usernameHash).toList())
+        .containsExactlyElementsOf(usernames.subList(0, usernames.size() - 1));
+
+    // if we confirm a username we already have held, it should just drop out of the holds list
+    accounts.reserveUsernameHash(account, usernames.get(holdToRereserve), Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, usernames.get(holdToRereserve), ENCRYPTED_USERNAME_1).join();
+
+    // should have a hold on every username but the one we just confirmed
+    assertThat(account.getUsernameHolds().stream().map(Account.UsernameHold::usernameHash).toList())
+        .containsExactlyElementsOf(Stream.concat(
+                usernames.subList(0, holdToRereserve).stream(),
+                usernames.subList(holdToRereserve + 1, usernames.size()).stream())
+            .toList());
+  }
+
+
   @Test
   public void testIgnoredFieldsNotAddedToDataAttribute() throws Exception {
     final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
-    account.setUsernameHash(RandomUtils.nextBytes(32));
-    account.setUsernameLinkDetails(UUID.randomUUID(), RandomUtils.nextBytes(32));
-    accounts.create(account);
+    account.setUsernameHash(TestRandomUtil.nextBytes(32));
+    account.setUsernameLinkDetails(UUID.randomUUID(), TestRandomUtil.nextBytes(32));
+    createAccount(account);
     final Map<String, AttributeValue> accountRecord = DYNAMO_DB_EXTENSION.getDynamoDbClient()
         .getItem(GetItemRequest.builder()
             .tableName(Tables.ACCOUNTS.tableName())
@@ -1007,8 +1602,74 @@ class AccountsTest {
         .forEach(field -> assertFalse(dataMap.containsKey(field)));
   }
 
-  private static Device generateDevice(long id) {
+  @Test
+  void testGetByUsernameHashAsync() {
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
+
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    createAccount(account);
+
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isEmpty();
+
+    accounts.reserveUsernameHash(account, USERNAME_HASH_1, Duration.ofDays(1)).join();
+    accounts.confirmUsernameHash(account, USERNAME_HASH_1, ENCRYPTED_USERNAME_1).join();
+
+    assertThat(accounts.getByUsernameHash(USERNAME_HASH_1).join()).isPresent();
+  }
+
+  @Test
+  public void testInvalidDeviceIdDeserialization() throws Exception {
+    final Account account = generateAccount("+18005551234", UUID.randomUUID(), UUID.randomUUID());
+    final Device device2 = generateDevice((byte) 64);
+    account.addDevice(device2);
+
+    createAccount(account);
+
+    final GetItemResponse response = DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient().getItem(GetItemRequest.builder()
+        .tableName(Tables.ACCOUNTS.tableName())
+        .key(Map.of(Accounts.KEY_ACCOUNT_UUID, AttributeValues.fromUUID(account.getUuid())))
+        .build()).join();
+
+    final Map<?, ?> accountData = SystemMapper.jsonMapper()
+        .readValue(response.item().get(Accounts.ATTR_ACCOUNT_DATA).b().asByteArray(), Map.class);
+
+    final List<Map<Object, Object>> devices = (List<Map<Object, Object>>) accountData.get("devices");
+    assertEquals(Integer.valueOf(device2.getId()), devices.get(1).get("id"));
+
+    devices.get(1).put("id", Byte.MAX_VALUE + 5);
+
+    DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient().updateItem(UpdateItemRequest.builder()
+        .tableName(Tables.ACCOUNTS.tableName())
+        .key(Map.of(Accounts.KEY_ACCOUNT_UUID, AttributeValues.fromUUID(account.getUuid())))
+        .updateExpression("SET #data = :data")
+        .expressionAttributeNames(Map.of("#data", Accounts.ATTR_ACCOUNT_DATA))
+        .expressionAttributeValues(
+            Map.of(":data", AttributeValues.fromByteArray(SystemMapper.jsonMapper().writeValueAsBytes(accountData))))
+        .build()).join();
+
+    final CompletionException e = assertThrows(CompletionException.class,
+        () -> accounts.getByAccountIdentifierAsync(account.getUuid()).join());
+
+    Throwable cause = e.getCause();
+    while (cause.getCause() != null) {
+      cause = cause.getCause();
+    }
+
+    assertInstanceOf(DeviceIdDeserializer.DeviceIdDeserializationException.class, cause);
+  }
+
+
+
+  private static Device generateDevice(byte id) {
     return DevicesHelper.createDevice(id);
+  }
+
+  private boolean createAccount(final Account account) {
+    try {
+      return accounts.create(account, Collections.emptyList());
+    } catch (AccountAlreadyExistsException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   private static Account nextRandomAccount() {
@@ -1017,12 +1678,12 @@ class AccountsTest {
   }
 
   private static Account generateAccount(String number, UUID uuid, final UUID pni) {
-    Device device = generateDevice(1);
+    Device device = generateDevice(DEVICE_ID_1);
     return generateAccount(number, uuid, pni, List.of(device));
   }
 
   private static Account generateAccount(String number, UUID uuid, final UUID pni, List<Device> devices) {
-    final byte[] unidentifiedAccessKey = new byte[16];
+    final byte[] unidentifiedAccessKey = new byte[UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH];
     final Random random = new Random(System.currentTimeMillis());
     Arrays.fill(unidentifiedAccessKey, (byte) random.nextInt(255));
 
@@ -1071,6 +1732,26 @@ class AccountsTest {
     assertThat(pniConstraintResponse.hasItem()).isFalse();
   }
 
+  private Map<String, AttributeValue> readAccount(final UUID uuid) {
+    final DynamoDbClient db = DYNAMO_DB_EXTENSION.getDynamoDbClient();
+
+    final GetItemResponse get = db.getItem(GetItemRequest.builder()
+        .tableName(Tables.ACCOUNTS.tableName())
+        .key(Map.of(Accounts.KEY_ACCOUNT_UUID, AttributeValues.fromUUID(uuid)))
+        .consistentRead(true)
+        .build());
+    return get.item();
+  }
+
+  private Map<String, AttributeValue> getUsernameConstraintTableItem(final byte[] usernameHash) {
+    return DYNAMO_DB_EXTENSION.getDynamoDbClient()
+        .getItem(GetItemRequest.builder()
+            .tableName(Tables.USERNAMES.tableName())
+            .key(Map.of(Accounts.UsernameTable.KEY_USERNAME_HASH, AttributeValues.fromByteArray(usernameHash)))
+            .build())
+        .item();
+  }
+
   private void verifyStoredState(String number, UUID uuid, UUID pni, byte[] usernameHash, Account expecting, boolean canonicallyDiscoverable) {
     final DynamoDbClient db = DYNAMO_DB_EXTENSION.getDynamoDbClient();
 
@@ -1116,11 +1797,16 @@ class AccountsTest {
       assertThat(resultDevice.getApnId()).isEqualTo(expectingDevice.getApnId());
       assertThat(resultDevice.getGcmId()).isEqualTo(expectingDevice.getGcmId());
       assertThat(resultDevice.getLastSeen()).isEqualTo(expectingDevice.getLastSeen());
-      assertThat(resultDevice.getSignedPreKey()).isEqualTo(expectingDevice.getSignedPreKey());
       assertThat(resultDevice.getFetchesMessages()).isEqualTo(expectingDevice.getFetchesMessages());
       assertThat(resultDevice.getUserAgent()).isEqualTo(expectingDevice.getUserAgent());
       assertThat(resultDevice.getName()).isEqualTo(expectingDevice.getName());
       assertThat(resultDevice.getCreated()).isEqualTo(expectingDevice.getCreated());
     }
+  }
+
+  private static byte[] randomBytes(int count) {
+    byte[] bytes = new byte[count];
+    ThreadLocalRandom.current().nextBytes(bytes);
+    return bytes;
   }
 }

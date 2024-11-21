@@ -10,83 +10,65 @@ import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import java.util.List;
 import java.util.Optional;
-import javax.annotation.Nullable;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
-import org.apache.commons.lang3.StringUtils;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import org.signal.libsignal.zkgroup.profiles.ProfileKeyCommitment;
+import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
 import org.whispersystems.textsecuregcm.util.ExactlySize;
+import org.whispersystems.textsecuregcm.util.ValidHexString;
 
-public class CreateProfileRequest {
-
-  @JsonProperty
-  @NotEmpty
-  private String version;
-
-  @JsonProperty
-  @ExactlySize({108, 380})
-  private String name;
-
-  @JsonProperty
-  private boolean avatar;
-
-  @JsonProperty
-  private boolean sameAvatar;
-
-  @JsonProperty
-  @ExactlySize({0, 80})
-  private String aboutEmoji;
-
-  @JsonProperty
-  @ExactlySize({0, 208, 376, 720})
-  private String about;
-
-  @JsonProperty
-  @ExactlySize({0, 776})
-  private String paymentAddress;
-
-  @JsonProperty
-  @Nullable
-  private List<String> badgeIds;
-
+public record CreateProfileRequest(
   @JsonProperty
   @NotNull
   @JsonDeserialize(using = ProfileKeyCommitmentAdapter.Deserializing.class)
   @JsonSerialize(using = ProfileKeyCommitmentAdapter.Serializing.class)
-  private ProfileKeyCommitment commitment;
+  ProfileKeyCommitment commitment,
 
-  public CreateProfileRequest() {
-  }
+  @JsonProperty
+  @NotEmpty
+  @ValidHexString
+  @ExactlySize({64})
+  String version,
 
-  public CreateProfileRequest(
-      ProfileKeyCommitment commitment, String version, String name, String aboutEmoji, String about,
-      String paymentAddress, boolean wantsAvatar, boolean sameAvatar, List<String> badgeIds) {
-    this.commitment = commitment;
-    this.version = version;
-    this.name = name;
-    this.aboutEmoji = aboutEmoji;
-    this.about = about;
-    this.paymentAddress = paymentAddress;
-    this.avatar = wantsAvatar;
-    this.sameAvatar = sameAvatar;
-    this.badgeIds = badgeIds;
-  }
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  @ExactlySize({81, 285})
+  byte[] name,
 
-  public ProfileKeyCommitment getCommitment() {
-    return commitment;
-  }
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  @ExactlySize({0, 60})
+  byte[] aboutEmoji,
 
-  public String getVersion() {
-    return version;
-  }
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  @ExactlySize({0, 156, 282, 540})
+  byte[] about,
 
-  public String getName() {
-    return name;
-  }
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  @ExactlySize({0, 582})
+  byte[] paymentAddress,
 
-  public boolean hasAvatar() {
-    return avatar;
-  }
+  @JsonProperty("avatar")
+  boolean hasAvatar,
+
+  @JsonProperty
+  boolean sameAvatar,
+
+  @JsonProperty("badgeIds")
+  Optional<List<String>> badges,
+
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  @ExactlySize({0, 29})
+  byte[] phoneNumberSharing
+) {
 
   public enum AvatarChange {
     UNCHANGED,
@@ -104,19 +86,4 @@ public class CreateProfileRequest {
     return AvatarChange.UNCHANGED;
   }
 
-  public String getAboutEmoji() {
-    return StringUtils.stripToNull(aboutEmoji);
-  }
-
-  public String getAbout() {
-    return StringUtils.stripToNull(about);
-  }
-
-  public String getPaymentAddress() {
-    return StringUtils.stripToNull(paymentAddress);
-  }
-
-  public Optional<List<String>> getBadges() {
-    return Optional.ofNullable(badgeIds);
-  }
 }

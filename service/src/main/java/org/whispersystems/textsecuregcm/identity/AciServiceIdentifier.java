@@ -5,11 +5,14 @@
 
 package org.whispersystems.textsecuregcm.identity;
 
+import io.micrometer.core.instrument.Metrics;
+import io.swagger.v3.oas.annotations.media.Schema;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.UUID;
-import io.swagger.v3.oas.annotations.media.Schema;
+import org.signal.libsignal.protocol.ServiceId;
+import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.util.UUIDUtil;
 
 /**
@@ -22,7 +25,6 @@ import org.whispersystems.textsecuregcm.util.UUIDUtil;
     description = "An identifier for an account based on the account's ACI"
 )
 public record AciServiceIdentifier(UUID uuid) implements ServiceIdentifier {
-
   private static final IdentityType IDENTITY_TYPE = IdentityType.ACI;
 
   @Override
@@ -51,10 +53,13 @@ public record AciServiceIdentifier(UUID uuid) implements ServiceIdentifier {
     return byteBuffer.array();
   }
 
+  @Override
+  public ServiceId.Aci toLibsignal() {
+    return new ServiceId.Aci(uuid);
+  }
+
   public static AciServiceIdentifier valueOf(final String string) {
-    return new AciServiceIdentifier(
-        UUID.fromString(string.startsWith(IDENTITY_TYPE.getStringPrefix())
-            ? string.substring(IDENTITY_TYPE.getStringPrefix().length()) : string));
+    return new AciServiceIdentifier(UUID.fromString(string));
   }
 
   public static AciServiceIdentifier fromBytes(final byte[] bytes) {

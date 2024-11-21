@@ -10,10 +10,12 @@ import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
+import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
 import org.whispersystems.textsecuregcm.util.ServiceIdentifierAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
 
 import java.util.List;
+import java.util.Map;
 
 public class BaseProfileResponse {
 
@@ -23,13 +25,15 @@ public class BaseProfileResponse {
   private IdentityKey identityKey;
 
   @JsonProperty
-  private String unidentifiedAccess;
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] unidentifiedAccess;
 
   @JsonProperty
   private boolean unrestrictedUnidentifiedAccess;
 
   @JsonProperty
-  private UserCapabilities capabilities;
+  private Map<String, Boolean> capabilities;
 
   @JsonProperty
   private List<Badge> badges;
@@ -43,9 +47,9 @@ public class BaseProfileResponse {
   }
 
   public BaseProfileResponse(final IdentityKey identityKey,
-      final String unidentifiedAccess,
+      final byte[] unidentifiedAccess,
       final boolean unrestrictedUnidentifiedAccess,
-      final UserCapabilities capabilities,
+      final Map<String, Boolean> capabilities,
       final List<Badge> badges,
       final ServiceIdentifier uuid) {
 
@@ -61,7 +65,7 @@ public class BaseProfileResponse {
     return identityKey;
   }
 
-  public String getUnidentifiedAccess() {
+  public byte[] getUnidentifiedAccess() {
     return unidentifiedAccess;
   }
 
@@ -69,7 +73,7 @@ public class BaseProfileResponse {
     return unrestrictedUnidentifiedAccess;
   }
 
-  public UserCapabilities getCapabilities() {
+  public Map<String, Boolean> getCapabilities() {
     return capabilities;
   }
 

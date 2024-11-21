@@ -45,7 +45,7 @@ public class PushChallengeManager {
   }
 
   public void sendChallenge(final Account account) throws NotPushRegisteredException {
-    final Device masterDevice = account.getMasterDevice().orElseThrow(NotPushRegisteredException::new);
+    final Device primaryDevice = account.getPrimaryDevice();
 
     final byte[] token = new byte[CHALLENGE_TOKEN_LENGTH];
     random.nextBytes(token);
@@ -58,9 +58,9 @@ public class PushChallengeManager {
 
       sent = true;
 
-      if (StringUtils.isNotBlank(masterDevice.getGcmId())) {
+      if (StringUtils.isNotBlank(primaryDevice.getGcmId())) {
         platform = ClientPlatform.ANDROID.name().toLowerCase();
-      } else if (StringUtils.isNotBlank(masterDevice.getApnId())) {
+      } else if (StringUtils.isNotBlank(primaryDevice.getApnId())) {
         platform = ClientPlatform.IOS.name().toLowerCase();
       } else {
         // This should never happen; if the account has neither an APN nor FCM token, sending the challenge will result
@@ -86,16 +86,15 @@ public class PushChallengeManager {
     } catch (final IllegalArgumentException ignored) {
     }
 
-    final String platform = account.getMasterDevice().map(masterDevice -> {
-      if (StringUtils.isNotBlank(masterDevice.getGcmId())) {
-        return ClientPlatform.IOS.name().toLowerCase();
-      } else if (StringUtils.isNotBlank(masterDevice.getApnId())) {
-        return ClientPlatform.ANDROID.name().toLowerCase();
-      } else {
-        return "unknown";
-      }
-    }).orElse("unknown");
+    final String platform;
 
+    if (StringUtils.isNotBlank(account.getPrimaryDevice().getGcmId())) {
+      platform = ClientPlatform.ANDROID.name().toLowerCase();
+    } else if (StringUtils.isNotBlank(account.getPrimaryDevice().getApnId())) {
+      platform = ClientPlatform.IOS.name().toLowerCase();
+    } else {
+      platform = "unknown";
+    }
 
     Metrics.counter(CHALLENGE_ANSWERED_COUNTER_NAME,
         PLATFORM_TAG_NAME, platform,

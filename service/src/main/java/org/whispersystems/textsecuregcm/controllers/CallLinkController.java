@@ -3,23 +3,24 @@ package org.whispersystems.textsecuregcm.controllers;
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
 import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.zkgroup.GenericServerSecretParams;
 import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.calllinks.CreateCallLinkCredentialRequest;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.entities.CreateCallLinkCredential;
 import org.whispersystems.textsecuregcm.entities.GetCreateCallLinkCredentialsRequest;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
+import org.whispersystems.websocket.auth.ReadOnly;
 
 @Path("/v1/call-link")
 @io.swagger.v3.oas.annotations.tags.Tag(name = "CallLink")
@@ -51,7 +52,7 @@ public class CallLinkController {
   @ApiResponse(responseCode = "422", description = "Invalid request format.")
   @ApiResponse(responseCode = "429", description = "Ratelimited.")
   public CreateCallLinkCredential getCreateAuth(
-      final @Auth AuthenticatedAccount auth,
+      final @ReadOnly @Auth AuthenticatedDevice auth,
       final @NotNull @Valid GetCreateCallLinkCredentialsRequest request
   ) throws RateLimitExceededException {
 

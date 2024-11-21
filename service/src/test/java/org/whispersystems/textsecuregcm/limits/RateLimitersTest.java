@@ -12,17 +12,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
 import org.junit.jupiter.api.Test;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicRateLimitPolicy;
 import org.whispersystems.textsecuregcm.redis.ClusterLuaScript;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.util.MockUtils;
 import org.whispersystems.textsecuregcm.util.MutableClock;
@@ -37,13 +37,13 @@ public class RateLimitersTest {
 
   private final ClusterLuaScript validateScript = mock(ClusterLuaScript.class);
 
-  private final FaultTolerantRedisCluster redisCluster = mock(FaultTolerantRedisCluster.class);
+  private final FaultTolerantRedisClusterClient redisCluster = mock(FaultTolerantRedisClusterClient.class);
 
   private final MutableClock clock = MockUtils.mutableClock(0);
 
   private static final String BAD_YAML = """
       limits:
-        smsVoicePrefix:
+        prekeys:
           bucketSize: 150
           permitRegenerationDuration: PT6S
         unexpected:
@@ -53,7 +53,7 @@ public class RateLimitersTest {
 
   private static final String GOOD_YAML = """
       limits:
-        smsVoicePrefix:
+        prekeys:
           bucketSize: 150
           permitRegenerationDuration: PT6S
         attachmentCreate:
@@ -111,7 +111,7 @@ public class RateLimitersTest {
     final RateLimiters rateLimiters = new RateLimiters(Collections.emptyMap(), dynamicConfig, validateScript, redisCluster, clock);
     final RateLimiter limiter = rateLimiters.getRateLimitResetLimiter();
     final RateLimiterConfig expected = RateLimiters.For.RATE_LIMIT_RESET.defaultConfig();
-    assertEquals(expected, limiter.config());
+    assertEquals(expected, config(limiter));
   }
 
   @Test
@@ -122,8 +122,8 @@ public class RateLimitersTest {
 
     final Map<String, RateLimiterConfig> limitsConfigMap = new HashMap<>();
 
-    limitsConfigMap.put(RateLimiters.For.RECAPTCHA_CHALLENGE_ATTEMPT.id(), baseConfig);
-    limitsConfigMap.put(RateLimiters.For.RECAPTCHA_CHALLENGE_SUCCESS.id(), baseConfig);
+    limitsConfigMap.put(RateLimiters.For.CAPTCHA_CHALLENGE_ATTEMPT.id(), baseConfig);
+    limitsConfigMap.put(RateLimiters.For.CAPTCHA_CHALLENGE_SUCCESS.id(), baseConfig);
 
     when(configuration.getLimits()).thenReturn(limitsConfigMap);
 
@@ -131,21 +131,21 @@ public class RateLimitersTest {
     final RateLimiter limiter = rateLimiters.getRateLimitResetLimiter();
 
     limitsConfigMap.put(RateLimiters.For.RATE_LIMIT_RESET.id(), initialRateLimiterConfig);
-    assertEquals(initialRateLimiterConfig, limiter.config());
+    assertEquals(initialRateLimiterConfig, config(limiter));
 
-    assertEquals(baseConfig, rateLimiters.getRecaptchaChallengeAttemptLimiter().config());
-    assertEquals(baseConfig, rateLimiters.getRecaptchaChallengeSuccessLimiter().config());
+    assertEquals(baseConfig, config(rateLimiters.getCaptchaChallengeAttemptLimiter()));
+    assertEquals(baseConfig, config(rateLimiters.getCaptchaChallengeSuccessLimiter()));
 
     limitsConfigMap.put(RateLimiters.For.RATE_LIMIT_RESET.id(), updatedRateLimiterCongig);
-    assertEquals(updatedRateLimiterCongig, limiter.config());
+    assertEquals(updatedRateLimiterCongig, config(limiter));
 
-    assertEquals(baseConfig, rateLimiters.getRecaptchaChallengeAttemptLimiter().config());
-    assertEquals(baseConfig, rateLimiters.getRecaptchaChallengeSuccessLimiter().config());
+    assertEquals(baseConfig, config(rateLimiters.getCaptchaChallengeAttemptLimiter()));
+    assertEquals(baseConfig, config(rateLimiters.getCaptchaChallengeSuccessLimiter()));
   }
 
   @Test
   public void testRateLimiterHasItsPrioritiesStraight() throws Exception {
-    final RateLimiters.For descriptor = RateLimiters.For.RECAPTCHA_CHALLENGE_ATTEMPT;
+    final RateLimiters.For descriptor = RateLimiters.For.CAPTCHA_CHALLENGE_ATTEMPT;
     final RateLimiterConfig configForDynamic = new RateLimiterConfig(1, Duration.ofMinutes(1));
     final RateLimiterConfig configForStatic = new RateLimiterConfig(2, Duration.ofSeconds(30));
     final RateLimiterConfig defaultConfig = descriptor.defaultConfig();
@@ -161,22 +161,22 @@ public class RateLimitersTest {
     // test only default is present
     mapForDynamic.remove(descriptor.id());
     mapForStatic.remove(descriptor.id());
-    assertEquals(defaultConfig, limiter.config());
+    assertEquals(defaultConfig, config(limiter));
 
     // test dynamic and no static
     mapForDynamic.put(descriptor.id(), configForDynamic);
     mapForStatic.remove(descriptor.id());
-    assertEquals(configForDynamic, limiter.config());
+    assertEquals(configForDynamic, config(limiter));
 
     // test dynamic and static
     mapForDynamic.put(descriptor.id(), configForDynamic);
     mapForStatic.put(descriptor.id(), configForStatic);
-    assertEquals(configForDynamic, limiter.config());
+    assertEquals(configForDynamic, config(limiter));
 
     // test static, but no dynamic
     mapForDynamic.remove(descriptor.id());
     mapForStatic.put(descriptor.id(), configForStatic);
-    assertEquals(configForStatic, limiter.config());
+    assertEquals(configForStatic, config(limiter));
   }
 
   private record TestDescriptor(String id) implements RateLimiterDescriptor {
@@ -190,5 +190,15 @@ public class RateLimitersTest {
     public RateLimiterConfig defaultConfig() {
       return new RateLimiterConfig(1, Duration.ofMinutes(1));
     }
+  }
+
+  private static RateLimiterConfig config(final RateLimiter rateLimiter) {
+    if (rateLimiter instanceof StaticRateLimiter rm) {
+      return rm.config();
+    }
+    if (rateLimiter instanceof DynamicRateLimiter rm) {
+      return rm.config();
+    }
+    throw new IllegalArgumentException("Rate limiter is of an unexpected type: " + rateLimiter.getClass().getName());
   }
 }

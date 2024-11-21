@@ -10,6 +10,9 @@ import static java.util.Objects.requireNonNull;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.io.Resources;
 import com.google.common.net.HttpHeaders;
+import io.dropwizard.configuration.ConfigurationValidationException;
+import io.dropwizard.jersey.validation.Validators;
+import jakarta.validation.ConstraintViolation;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.net.URI;
@@ -17,14 +20,15 @@ import java.net.URL;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Executors;
-import org.apache.commons.lang3.RandomUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
@@ -47,6 +51,7 @@ import org.whispersystems.textsecuregcm.entities.RegistrationRequest;
 import org.whispersystems.textsecuregcm.http.FaultTolerantHttpClient;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.util.HeaderUtils;
+import org.whispersystems.textsecuregcm.util.HttpUtils;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 
 public final class Operations {
@@ -67,38 +72,8 @@ public final class Operations {
   }
 
   public static TestUser newRegisteredUser(final String number) {
-    final byte[] registrationPassword = RandomUtils.nextBytes(32);
-    final String accountPassword = Base64.getEncoder().encodeToString(RandomUtils.nextBytes(32));
-
-    final TestUser user = TestUser.create(number, accountPassword, registrationPassword);
-    final AccountAttributes accountAttributes = user.accountAttributes();
-
-    INTEGRATION_TOOLS.populateRecoveryPassword(number, registrationPassword).join();
-
-    // register account
-    final RegistrationRequest registrationRequest = new RegistrationRequest(
-        null, registrationPassword, accountAttributes, true, false,
-        Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
-
-    final AccountIdentityResponse registrationResponse = apiPost("/v1/registration", registrationRequest)
-        .authorized(number, accountPassword)
-        .executeExpectSuccess(AccountIdentityResponse.class);
-
-    user.setAciUuid(registrationResponse.uuid());
-    user.setPniUuid(registrationResponse.pni());
-
-    // upload pre-key
-    final TestUser.PreKeySetPublicView preKeySetPublicView = user.preKeys(Device.MASTER_ID, false);
-    apiPut("/v2/keys", preKeySetPublicView)
-        .authorized(user, Device.MASTER_ID)
-        .executeExpectSuccess();
-
-    return user;
-  }
-
-  public static TestUser newRegisteredUserAtomic(final String number) {
-    final byte[] registrationPassword = RandomUtils.nextBytes(32);
-    final String accountPassword = Base64.getEncoder().encodeToString(RandomUtils.nextBytes(32));
+    final byte[] registrationPassword = randomBytes(32);
+    final String accountPassword = Base64.getEncoder().encodeToString(randomBytes(32));
 
     final TestUser user = TestUser.create(number, accountPassword, registrationPassword);
     final AccountAttributes accountAttributes = user.accountAttributes();
@@ -113,13 +88,12 @@ public final class Operations {
         registrationPassword,
         accountAttributes,
         true,
-        true,
-        Optional.of(new IdentityKey(aciIdentityKeyPair.getPublicKey())),
-        Optional.of(new IdentityKey(pniIdentityKeyPair.getPublicKey())),
-        Optional.of(generateSignedECPreKey(1, aciIdentityKeyPair)),
-        Optional.of(generateSignedECPreKey(2, pniIdentityKeyPair)),
-        Optional.of(generateSignedKEMPreKey(3, aciIdentityKeyPair)),
-        Optional.of(generateSignedKEMPreKey(4, pniIdentityKeyPair)),
+        new IdentityKey(aciIdentityKeyPair.getPublicKey()),
+        new IdentityKey(pniIdentityKeyPair.getPublicKey()),
+        generateSignedECPreKey(1, aciIdentityKeyPair),
+        generateSignedECPreKey(2, pniIdentityKeyPair),
+        generateSignedKEMPreKey(3, aciIdentityKeyPair),
+        generateSignedKEMPreKey(4, pniIdentityKeyPair),
         Optional.empty(),
         Optional.empty());
 
@@ -131,6 +105,13 @@ public final class Operations {
     user.setPniUuid(registrationResponse.pni());
 
     return user;
+  }
+
+  public record PrescribedVerificationNumber(String number, String verificationCode) {}
+  public static PrescribedVerificationNumber prescribedVerificationNumber() {
+      return new PrescribedVerificationNumber(
+          CONFIG.prescribedRegistrationNumber(),
+          CONFIG.prescribedRegistrationCode());
   }
 
   public static void deleteUser(final TestUser user) {
@@ -178,6 +159,12 @@ public final class Operations {
     } catch (final Exception e) {
       throw new RuntimeException(e);
     }
+  }
+
+  private static byte[] randomBytes(int numBytes) {
+    final byte[] bytes = new byte[numBytes];
+    new SecureRandom().nextBytes(bytes);
+    return bytes;
   }
 
   public static RequestBuilder apiGet(final String endpoint) {
@@ -233,10 +220,10 @@ public final class Operations {
     }
 
     public RequestBuilder authorized(final TestUser user) {
-      return authorized(user, Device.MASTER_ID);
+      return authorized(user, Device.PRIMARY_ID);
     }
 
-    public RequestBuilder authorized(final TestUser user, final long deviceId) {
+    public RequestBuilder authorized(final TestUser user, final byte deviceId) {
       final String username = "%s.%d".formatted(user.aciUuid().toString(), deviceId);
       return authorized(username, user.accountPassword());
     }
@@ -263,7 +250,7 @@ public final class Operations {
     public Pair<Integer, Void> executeExpectSuccess() {
       final Pair<Integer, Void> execute = execute();
       Validate.isTrue(
-          execute.getLeft() >= 200 && execute.getLeft() < 300,
+          HttpUtils.isSuccessfulResponse(execute.getLeft()),
           "Unexpected response code: %d",
           execute.getLeft());
       return execute;
@@ -271,6 +258,10 @@ public final class Operations {
 
     public <T> T executeExpectSuccess(final Class<T> expectedType) {
       final Pair<Integer, T> execute = execute(expectedType);
+      Validate.isTrue(
+          HttpUtils.isSuccessfulResponse(execute.getLeft()),
+          "Unexpected response code: %d : %s",
+          execute.getLeft(), execute.getRight());
       return requireNonNull(execute.getRight());
     }
 
@@ -324,8 +315,16 @@ public final class Operations {
   private static Config loadConfigFromClasspath(final String filename) {
     try {
       final URL configFileUrl = Resources.getResource(filename);
-      return SystemMapper.yamlMapper().readValue(Resources.toByteArray(configFileUrl), Config.class);
-    } catch (final IOException e) {
+      final Config config = SystemMapper.yamlMapper().readValue(Resources.toByteArray(configFileUrl), Config.class);
+
+      final Set<ConstraintViolation<Config>> constraintViolations = Validators.newValidator().validate(config);
+
+      if (!constraintViolations.isEmpty()) {
+        throw new ConfigurationValidationException(filename, constraintViolations);
+      }
+
+      return config;
+    } catch (final Exception e) {
       throw new RuntimeException(e);
     }
   }

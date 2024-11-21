@@ -5,8 +5,6 @@
 
 package org.whispersystems.textsecuregcm.push;
 
-import com.codahale.metrics.InstrumentedExecutorService;
-import com.codahale.metrics.SharedMetricRegistries;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
 import java.util.concurrent.ExecutorService;
@@ -18,7 +16,6 @@ import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.util.Constants;
 
 public class ReceiptSender {
 
@@ -33,15 +30,11 @@ public class ReceiptSender {
     this.accountManager = accountManager;
     this.messageSender = messageSender;
     this.executor = ExecutorServiceMetrics.monitor(
-            Metrics.globalRegistry,
-            new InstrumentedExecutorService(executor,
-                    SharedMetricRegistries.getOrCreate(Constants.METRICS_NAME),
-                    MetricsUtil.name(ReceiptSender.class, "executor")),
-            MetricsUtil.name(ReceiptSender.class, "executor"), MetricsUtil.PREFIX)
+        Metrics.globalRegistry, executor, MetricsUtil.name(ReceiptSender.class, "executor"), MetricsUtil.PREFIX)
     ;
   }
 
-  public void sendReceipt(ServiceIdentifier sourceIdentifier, long sourceDeviceId, AciServiceIdentifier destinationIdentifier, long messageId) {
+  public void sendReceipt(ServiceIdentifier sourceIdentifier, byte sourceDeviceId, AciServiceIdentifier destinationIdentifier, long messageId) {
     if (sourceIdentifier.equals(destinationIdentifier)) {
       return;
     }
@@ -52,18 +45,16 @@ public class ReceiptSender {
             destinationAccount -> {
               final Envelope.Builder message = Envelope.newBuilder()
                   .setServerTimestamp(System.currentTimeMillis())
-                  .setSourceUuid(sourceIdentifier.toServiceIdentifierString())
-                  .setSourceDevice((int) sourceDeviceId)
-                  .setDestinationUuid(destinationIdentifier.toServiceIdentifierString())
-                  .setTimestamp(messageId)
+                  .setSourceServiceId(sourceIdentifier.toServiceIdentifierString())
+                  .setSourceDevice(sourceDeviceId)
+                  .setDestinationServiceId(destinationIdentifier.toServiceIdentifierString())
+                  .setClientTimestamp(messageId)
                   .setType(Envelope.Type.SERVER_DELIVERY_RECEIPT)
                   .setUrgent(false);
 
               for (final Device destinationDevice : destinationAccount.getDevices()) {
                 try {
                   messageSender.sendMessage(destinationAccount, destinationDevice, message.build(), false);
-                } catch (final NotPushRegisteredException e) {
-                  logger.debug("User no longer push registered for delivery receipt: {}", e.getMessage());
                 } catch (final Exception e) {
                   logger.warn("Could not send delivery receipt", e);
                 }

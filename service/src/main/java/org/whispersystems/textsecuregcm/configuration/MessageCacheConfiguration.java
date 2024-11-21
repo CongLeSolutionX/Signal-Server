@@ -6,26 +6,24 @@
 package org.whispersystems.textsecuregcm.configuration;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 
 public class MessageCacheConfiguration {
 
   @JsonProperty
   @NotNull
   @Valid
-  private RedisClusterConfiguration cluster;
+  private FaultTolerantRedisClusterFactory cluster;
 
   @JsonProperty
   private int persistDelayMinutes = 10;
 
-  public RedisClusterConfiguration getRedisClusterConfiguration() {
+  public FaultTolerantRedisClusterFactory getRedisClusterConfiguration() {
     return cluster;
   }
 
   public int getPersistDelayMinutes() {
     return persistDelayMinutes;
   }
-
 }

@@ -5,21 +5,28 @@
 
 package org.whispersystems.textsecuregcm.metrics;
 
-import com.codahale.metrics.Gauge;
+import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
+
 import com.sun.management.OperatingSystemMXBean;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.MeterBinder;
 import java.lang.management.ManagementFactory;
 
-public class FreeMemoryGauge implements Gauge<Long> {
+public class FreeMemoryGauge implements MeterBinder {
 
   private final OperatingSystemMXBean operatingSystemMXBean;
 
   public FreeMemoryGauge() {
     this.operatingSystemMXBean = (com.sun.management.OperatingSystemMXBean)
-            ManagementFactory.getOperatingSystemMXBean();
+        ManagementFactory.getOperatingSystemMXBean();
   }
 
   @Override
-  public Long getValue() {
-    return operatingSystemMXBean.getFreeMemorySize();
+  public void bindTo(final MeterRegistry registry) {
+    Gauge.builder(name(FreeMemoryGauge.class, "freeMemory"), operatingSystemMXBean,
+            OperatingSystemMXBean::getFreeMemorySize)
+        .register(registry);
+
   }
 }

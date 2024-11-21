@@ -11,7 +11,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 import javax.annotation.Nullable;
-import org.whispersystems.textsecuregcm.util.Util;
+import org.apache.commons.lang3.StringUtils;
 
 @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 public class StoredRegistrationLock {
@@ -73,16 +73,11 @@ public class StoredRegistrationLock {
   }
 
   public boolean verify(@Nullable String clientRegistrationLock) {
-    if (hasLockAndSalt() && Util.nonEmpty(clientRegistrationLock)) {
+    if (hasLockAndSalt() && StringUtils.isNotEmpty(clientRegistrationLock)) {
       SaltedTokenHash credentials = new SaltedTokenHash(registrationLock.get(), registrationLockSalt.get());
       return credentials.verify(clientRegistrationLock);
     } else {
       return false;
     }
-  }
-
-  @VisibleForTesting
-  public StoredRegistrationLock forTime(long timestamp) {
-    return new StoredRegistrationLock(registrationLock, registrationLockSalt, Instant.ofEpochMilli(timestamp));
   }
 }

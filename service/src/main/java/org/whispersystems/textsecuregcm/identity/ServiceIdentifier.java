@@ -7,6 +7,7 @@ package org.whispersystems.textsecuregcm.identity;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import java.util.UUID;
+import org.signal.libsignal.protocol.ServiceId;
 
 /**
  * A "service identifier" is a tuple of a UUID and identity type that identifies an account and identity within the
@@ -17,7 +18,7 @@ import java.util.UUID;
     description = "A service identifier is a tuple of a UUID and identity type that identifies an account and identity within the Signal service.",
     subTypes = {AciServiceIdentifier.class, PniServiceIdentifier.class}
 )
-public interface ServiceIdentifier {
+public sealed interface ServiceIdentifier permits AciServiceIdentifier, PniServiceIdentifier {
 
   /**
    * Returns the identity type of this account identifier.
@@ -55,6 +56,12 @@ public interface ServiceIdentifier {
    */
   byte[] toFixedWidthByteArray();
 
+  /**
+   * Parse a service identifier string, which should be a plain UUID string for ACIs and a prefixed UUID string for PNIs
+   *
+   * @param string A service identifier string
+   * @return The parsed {@link ServiceIdentifier}
+   */
   static ServiceIdentifier valueOf(final String string) {
     try {
       return AciServiceIdentifier.valueOf(string);
@@ -70,4 +77,16 @@ public interface ServiceIdentifier {
       return PniServiceIdentifier.fromBytes(bytes);
     }
   }
+
+  static ServiceIdentifier fromLibsignal(final ServiceId libsignalServiceId) {
+    if (libsignalServiceId instanceof ServiceId.Aci) {
+      return new AciServiceIdentifier(libsignalServiceId.getRawUUID());
+    }
+    if (libsignalServiceId instanceof ServiceId.Pni) {
+      return new PniServiceIdentifier(libsignalServiceId.getRawUUID());
+    }
+    throw new IllegalArgumentException("unknown libsignal ServiceId type");
+  }
+
+  ServiceId toLibsignal();
 }

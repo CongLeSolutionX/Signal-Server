@@ -7,9 +7,8 @@ package org.whispersystems.textsecuregcm.push;
 import static com.codahale.metrics.MetricRegistry.name;
 import static org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.micrometer.core.instrument.Metrics;
-import org.apache.commons.lang3.StringUtils;
-import org.whispersystems.textsecuregcm.redis.RedisOperation;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.MessagesManager;
@@ -23,16 +22,12 @@ import org.whispersystems.textsecuregcm.storage.MessagesManager;
  * for "online" delivery only and will not be delivered (and clients will not be notified) if the destination device
  * isn't actively connected to a Signal server.
  *
- * @see ClientPresenceManager
- * @see org.whispersystems.textsecuregcm.storage.MessageAvailabilityListener
  * @see ReceiptSender
  */
 public class MessageSender {
 
-  private final ClientPresenceManager clientPresenceManager;
   private final MessagesManager messagesManager;
   private final PushNotificationManager pushNotificationManager;
-  private final PushLatencyManager pushLatencyManager;
 
   private static final String SEND_COUNTER_NAME = name(MessageSender.class, "sendMessage");
   private static final String CHANNEL_TAG_NAME = "channel";
@@ -41,71 +36,44 @@ public class MessageSender {
   private static final String URGENT_TAG_NAME = "urgent";
   private static final String STORY_TAG_NAME = "story";
   private static final String SEALED_SENDER_TAG_NAME = "sealedSender";
-  private static final String HAS_SPAM_REPORTING_TOKEN_TAG_NAME = "hasSpamReportingToken";
 
-  public MessageSender(ClientPresenceManager clientPresenceManager,
-      MessagesManager messagesManager,
-      PushNotificationManager pushNotificationManager,
-      PushLatencyManager pushLatencyManager) {
-    this.clientPresenceManager = clientPresenceManager;
+  public MessageSender(final MessagesManager messagesManager, final PushNotificationManager pushNotificationManager) {
     this.messagesManager = messagesManager;
     this.pushNotificationManager = pushNotificationManager;
-    this.pushLatencyManager = pushLatencyManager;
   }
 
-  public void sendMessage(final Account account, final Device device, final Envelope message, final boolean online)
-      throws NotPushRegisteredException {
+  public void sendMessage(final Account account, final Device device, final Envelope message, final boolean online) {
+    final boolean destinationPresent = messagesManager.insert(account.getUuid(),
+        device.getId(),
+        online ? message.toBuilder().setEphemeral(true).build() : message);
 
-    final String channel;
-
-    if (device.getGcmId() != null) {
-      channel = "gcm";
-    } else if (device.getApnId() != null) {
-      channel = "apn";
-    } else if (device.getFetchesMessages()) {
-      channel = "websocket";
-    } else {
-      throw new AssertionError();
-    }
-
-    final boolean clientPresent;
-
-    if (online) {
-      clientPresent = clientPresenceManager.isPresent(account.getUuid(), device.getId());
-
-      if (clientPresent) {
-        messagesManager.insert(account.getUuid(), device.getId(), message.toBuilder().setEphemeral(true).build());
-      }
-    } else {
-      messagesManager.insert(account.getUuid(), device.getId(), message);
-
-      // We check for client presence after inserting the message to take a conservative view of notifications. If the
-      // client wasn't present at the time of insertion but is now, they'll retrieve the message. If they were present
-      // but disconnected before the message was delivered, we should send a notification.
-      clientPresent = clientPresenceManager.isPresent(account.getUuid(), device.getId());
-
-      if (!clientPresent) {
-        try {
-          pushNotificationManager.sendNewMessageNotification(account, device.getId(), message.getUrgent());
-
-          final boolean useVoip = StringUtils.isNotBlank(device.getVoipApnId());
-          RedisOperation.unchecked(() -> pushLatencyManager.recordPushSent(account.getUuid(), device.getId(), useVoip, message.getUrgent()));
-        } catch (final NotPushRegisteredException e) {
-          if (!device.getFetchesMessages()) {
-            throw e;
-          }
-        }
+    if (!destinationPresent && !online) {
+      try {
+        pushNotificationManager.sendNewMessageNotification(account, device.getId(), message.getUrgent());
+      } catch (final NotPushRegisteredException ignored) {
       }
     }
 
     Metrics.counter(SEND_COUNTER_NAME,
-            CHANNEL_TAG_NAME, channel,
+            CHANNEL_TAG_NAME, getDeliveryChannelName(device),
             EPHEMERAL_TAG_NAME, String.valueOf(online),
-            CLIENT_ONLINE_TAG_NAME, String.valueOf(clientPresent),
+            CLIENT_ONLINE_TAG_NAME, String.valueOf(destinationPresent),
             URGENT_TAG_NAME, String.valueOf(message.getUrgent()),
             STORY_TAG_NAME, String.valueOf(message.getStory()),
-            SEALED_SENDER_TAG_NAME, String.valueOf(!message.hasSourceUuid()),
-            HAS_SPAM_REPORTING_TOKEN_TAG_NAME, String.valueOf(message.getReportSpamToken() != null && !message.getReportSpamToken().isEmpty()))
+            SEALED_SENDER_TAG_NAME, String.valueOf(!message.hasSourceServiceId()))
         .increment();
+  }
+
+  @VisibleForTesting
+  static String getDeliveryChannelName(final Device device) {
+    if (device.getGcmId() != null) {
+      return "gcm";
+    } else if (device.getApnId() != null) {
+      return "apn";
+    } else if (device.getFetchesMessages()) {
+      return "websocket";
+    } else {
+      return "none";
+    }
   }
 }

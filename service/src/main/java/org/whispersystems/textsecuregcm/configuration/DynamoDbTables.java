@@ -7,10 +7,10 @@ package org.whispersystems.textsecuregcm.configuration;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
-import javax.validation.Valid;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.NotNull;
 
 public class DynamoDbTables {
 
@@ -47,6 +47,9 @@ public class DynamoDbTables {
   }
 
   private final AccountsTableConfiguration accounts;
+
+  private final Table backups;
+  private final Table clientPublicKeys;
   private final Table clientReleases;
   private final Table deletedAccounts;
   private final Table deletedAccountsLock;
@@ -56,18 +59,23 @@ public class DynamoDbTables {
   private final Table kemKeys;
   private final Table kemLastResortKeys;
   private final TableWithExpiration messages;
+  private final TableWithExpiration onetimeDonations;
   private final Table phoneNumberIdentifiers;
   private final Table profiles;
   private final Table pushChallenge;
+  private final Table pushNotificationExperimentSamples;
   private final TableWithExpiration redeemedReceipts;
   private final TableWithExpiration registrationRecovery;
   private final Table remoteConfig;
   private final Table reportMessage;
+  private final TableWithExpiration scheduledJobs;
   private final Table subscriptions;
   private final Table verificationSessions;
 
   public DynamoDbTables(
       @JsonProperty("accounts") final AccountsTableConfiguration accounts,
+      @JsonProperty("backups") final Table backups,
+      @JsonProperty("clientPublicKeys") final Table clientPublicKeys,
       @JsonProperty("clientReleases") final Table clientReleases,
       @JsonProperty("deletedAccounts") final Table deletedAccounts,
       @JsonProperty("deletedAccountsLock") final Table deletedAccountsLock,
@@ -77,17 +85,22 @@ public class DynamoDbTables {
       @JsonProperty("pqKeys") final Table kemKeys,
       @JsonProperty("pqLastResortKeys") final Table kemLastResortKeys,
       @JsonProperty("messages") final TableWithExpiration messages,
+      @JsonProperty("onetimeDonations") final TableWithExpiration onetimeDonations,
       @JsonProperty("phoneNumberIdentifiers") final Table phoneNumberIdentifiers,
       @JsonProperty("profiles") final Table profiles,
       @JsonProperty("pushChallenge") final Table pushChallenge,
+      @JsonProperty("pushNotificationExperimentSamples") final Table pushNotificationExperimentSamples,
       @JsonProperty("redeemedReceipts") final TableWithExpiration redeemedReceipts,
       @JsonProperty("registrationRecovery") final TableWithExpiration registrationRecovery,
       @JsonProperty("remoteConfig") final Table remoteConfig,
       @JsonProperty("reportMessage") final Table reportMessage,
+      @JsonProperty("scheduledJobs") final TableWithExpiration scheduledJobs,
       @JsonProperty("subscriptions") final Table subscriptions,
       @JsonProperty("verificationSessions") final Table verificationSessions) {
 
     this.accounts = accounts;
+    this.backups = backups;
+    this.clientPublicKeys = clientPublicKeys;
     this.clientReleases = clientReleases;
     this.deletedAccounts = deletedAccounts;
     this.deletedAccountsLock = deletedAccountsLock;
@@ -97,13 +110,16 @@ public class DynamoDbTables {
     this.kemKeys = kemKeys;
     this.kemLastResortKeys = kemLastResortKeys;
     this.messages = messages;
+    this.onetimeDonations = onetimeDonations;
     this.phoneNumberIdentifiers = phoneNumberIdentifiers;
     this.profiles = profiles;
     this.pushChallenge = pushChallenge;
+    this.pushNotificationExperimentSamples = pushNotificationExperimentSamples;
     this.redeemedReceipts = redeemedReceipts;
     this.registrationRecovery = registrationRecovery;
     this.remoteConfig = remoteConfig;
     this.reportMessage = reportMessage;
+    this.scheduledJobs = scheduledJobs;
     this.subscriptions = subscriptions;
     this.verificationSessions = verificationSessions;
   }
@@ -112,6 +128,18 @@ public class DynamoDbTables {
   @Valid
   public AccountsTableConfiguration getAccounts() {
     return accounts;
+  }
+
+  @NotNull
+  @Valid
+  public Table getBackups() {
+    return backups;
+  }
+
+  @NotNull
+  @Valid
+  public Table getClientPublicKeys() {
+    return clientPublicKeys;
   }
 
   @NotNull
@@ -170,6 +198,12 @@ public class DynamoDbTables {
 
   @NotNull
   @Valid
+  public TableWithExpiration getOnetimeDonations() {
+    return onetimeDonations;
+  }
+
+  @NotNull
+  @Valid
   public Table getPhoneNumberIdentifiers() {
     return phoneNumberIdentifiers;
   }
@@ -184,6 +218,12 @@ public class DynamoDbTables {
   @Valid
   public Table getPushChallenge() {
     return pushChallenge;
+  }
+
+  @NotNull
+  @Valid
+  public Table getPushNotificationExperimentSamples() {
+    return pushNotificationExperimentSamples;
   }
 
   @NotNull
@@ -208,6 +248,12 @@ public class DynamoDbTables {
   @Valid
   public Table getReportMessage() {
     return reportMessage;
+  }
+
+  @NotNull
+  @Valid
+  public TableWithExpiration getScheduledJobs() {
+    return scheduledJobs;
   }
 
   @NotNull

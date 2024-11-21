@@ -10,6 +10,8 @@ import static org.whispersystems.textsecuregcm.util.AttributeValues.n;
 import static org.whispersystems.textsecuregcm.util.AttributeValues.s;
 
 import com.google.common.base.Throwables;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.core.Response.Status;
 import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
@@ -23,10 +25,8 @@ import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import javax.ws.rs.ClientErrorException;
-import javax.ws.rs.core.Response.Status;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialRequest;
-import org.whispersystems.textsecuregcm.subscriptions.SubscriptionProcessor;
+import org.whispersystems.textsecuregcm.subscriptions.PaymentProvider;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
@@ -62,17 +62,17 @@ public class IssuedReceiptsManager {
    * <p>
    * If this item has already been used to issue another receipt, throws a 409 conflict web application exception.
    * <p>
-   * For {@link SubscriptionProcessor#STRIPE}, item is expected to refer to an invoice line item (subscriptions) or a
+   * For {@link PaymentProvider#STRIPE}, item is expected to refer to an invoice line item (subscriptions) or a
    * payment intent (one-time).
    */
   public CompletableFuture<Void> recordIssuance(
       String processorItemId,
-      SubscriptionProcessor processor,
+      PaymentProvider processor,
       ReceiptCredentialRequest request,
       Instant now) {
 
     final AttributeValue key;
-    if (processor == SubscriptionProcessor.STRIPE) {
+    if (processor == PaymentProvider.STRIPE) {
       // As the first processor, Stripe’s IDs were not prefixed. Its item IDs have documented prefixes (`il_`, `pi_`)
       // that will not collide with `SubscriptionProcessor` names
       key = s(processorItemId);

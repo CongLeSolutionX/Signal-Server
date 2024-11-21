@@ -5,57 +5,60 @@
 package org.whispersystems.textsecuregcm;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import io.dropwizard.Configuration;
+import io.dropwizard.core.Configuration;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import java.time.Duration;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
 import org.whispersystems.textsecuregcm.attachments.TusConfiguration;
-import org.whispersystems.textsecuregcm.configuration.AccountDatabaseCrawlerConfiguration;
-import org.whispersystems.textsecuregcm.configuration.AdminEventLoggingConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ApnConfiguration;
-import org.whispersystems.textsecuregcm.configuration.AppConfigConfiguration;
+import org.whispersystems.textsecuregcm.configuration.AppleAppStoreConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ArtServiceConfiguration;
-import org.whispersystems.textsecuregcm.configuration.AwsAttachmentsConfiguration;
+import org.whispersystems.textsecuregcm.configuration.AwsCredentialsProviderFactory;
 import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
 import org.whispersystems.textsecuregcm.configuration.BraintreeConfiguration;
+import org.whispersystems.textsecuregcm.configuration.Cdn3StorageManagerConfiguration;
 import org.whispersystems.textsecuregcm.configuration.CdnConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ClientReleaseConfiguration;
-import org.whispersystems.textsecuregcm.configuration.CommandStopListenerConfiguration;
 import org.whispersystems.textsecuregcm.configuration.DatadogConfiguration;
+import org.whispersystems.textsecuregcm.configuration.DefaultAwsCredentialsFactory;
 import org.whispersystems.textsecuregcm.configuration.DirectoryV2Configuration;
-import org.whispersystems.textsecuregcm.configuration.DynamoDbClientConfiguration;
+import org.whispersystems.textsecuregcm.configuration.DogstatsdConfiguration;
+import org.whispersystems.textsecuregcm.configuration.DynamoDbClientFactory;
 import org.whispersystems.textsecuregcm.configuration.DynamoDbTables;
+import org.whispersystems.textsecuregcm.configuration.ExternalRequestFilterConfiguration;
+import org.whispersystems.textsecuregcm.configuration.FaultTolerantRedisClientFactory;
+import org.whispersystems.textsecuregcm.configuration.FaultTolerantRedisClusterFactory;
 import org.whispersystems.textsecuregcm.configuration.FcmConfiguration;
 import org.whispersystems.textsecuregcm.configuration.GcpAttachmentsConfiguration;
 import org.whispersystems.textsecuregcm.configuration.GenericZkConfig;
-import org.whispersystems.textsecuregcm.configuration.HCaptchaConfiguration;
+import org.whispersystems.textsecuregcm.configuration.GooglePlayBillingConfiguration;
+import org.whispersystems.textsecuregcm.configuration.KeyTransparencyServiceConfiguration;
 import org.whispersystems.textsecuregcm.configuration.LinkDeviceSecretConfiguration;
 import org.whispersystems.textsecuregcm.configuration.MaxDeviceConfiguration;
 import org.whispersystems.textsecuregcm.configuration.MessageByteLimitCardinalityEstimatorConfiguration;
 import org.whispersystems.textsecuregcm.configuration.MessageCacheConfiguration;
+import org.whispersystems.textsecuregcm.configuration.NoiseWebSocketTunnelConfiguration;
 import org.whispersystems.textsecuregcm.configuration.OneTimeDonationConfiguration;
 import org.whispersystems.textsecuregcm.configuration.PaymentsServiceConfiguration;
-import org.whispersystems.textsecuregcm.configuration.RecaptchaConfiguration;
-import org.whispersystems.textsecuregcm.configuration.RedisClusterConfiguration;
-import org.whispersystems.textsecuregcm.configuration.RedisConfiguration;
-import org.whispersystems.textsecuregcm.configuration.RegistrationServiceConfiguration;
+import org.whispersystems.textsecuregcm.configuration.RegistrationServiceClientFactory;
 import org.whispersystems.textsecuregcm.configuration.RemoteConfigConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ReportMessageConfiguration;
-import org.whispersystems.textsecuregcm.configuration.SecureBackupServiceConfiguration;
+import org.whispersystems.textsecuregcm.configuration.S3ObjectMonitorFactory;
 import org.whispersystems.textsecuregcm.configuration.SecureStorageServiceConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SecureValueRecovery2Configuration;
+import org.whispersystems.textsecuregcm.configuration.SecureValueRecovery3Configuration;
 import org.whispersystems.textsecuregcm.configuration.ShortCodeExpanderConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SpamFilterConfiguration;
 import org.whispersystems.textsecuregcm.configuration.StripeConfiguration;
 import org.whispersystems.textsecuregcm.configuration.SubscriptionConfiguration;
-import org.whispersystems.textsecuregcm.configuration.TurnSecretConfiguration;
+import org.whispersystems.textsecuregcm.configuration.TlsKeyStoreConfiguration;
+import org.whispersystems.textsecuregcm.configuration.TurnConfiguration;
 import org.whispersystems.textsecuregcm.configuration.UnidentifiedDeliveryConfiguration;
+import org.whispersystems.textsecuregcm.configuration.VirtualThreadConfiguration;
 import org.whispersystems.textsecuregcm.configuration.ZkConfig;
 import org.whispersystems.textsecuregcm.limits.RateLimiterConfig;
 import org.whispersystems.websocket.configuration.WebSocketConfiguration;
@@ -66,7 +69,12 @@ public class WhisperServerConfiguration extends Configuration {
   @NotNull
   @Valid
   @JsonProperty
-  private AdminEventLoggingConfiguration adminEventLoggingConfiguration;
+  private TlsKeyStoreConfiguration tlsKeyStore;
+
+  @NotNull
+  @Valid
+  @JsonProperty
+  AwsCredentialsProviderFactory awsCredentialsProvider = new DefaultAwsCredentialsFactory();
 
   @NotNull
   @Valid
@@ -81,17 +89,22 @@ public class WhisperServerConfiguration extends Configuration {
   @NotNull
   @Valid
   @JsonProperty
-  private DynamoDbClientConfiguration dynamoDbClientConfiguration;
+  private GooglePlayBillingConfiguration googlePlayBilling;
+
+  @NotNull
+  @Valid
+  @JsonProperty
+  private AppleAppStoreConfiguration appleAppStore;
+
+  @NotNull
+  @Valid
+  @JsonProperty
+  private DynamoDbClientFactory dynamoDbClient;
 
   @NotNull
   @Valid
   @JsonProperty
   private DynamoDbTables dynamoDbTables;
-
-  @NotNull
-  @Valid
-  @JsonProperty
-  private AwsAttachmentsConfiguration awsAttachments;
 
   @NotNull
   @Valid
@@ -106,22 +119,22 @@ public class WhisperServerConfiguration extends Configuration {
   @NotNull
   @Valid
   @JsonProperty
-  private DatadogConfiguration datadog;
+  private Cdn3StorageManagerConfiguration cdn3StorageManager;
 
   @NotNull
   @Valid
   @JsonProperty
-  private RedisClusterConfiguration cacheCluster;
+  private DatadogConfiguration dogstatsd = new DogstatsdConfiguration();
 
   @NotNull
   @Valid
   @JsonProperty
-  private RedisConfiguration pubsub;
+  private FaultTolerantRedisClusterFactory cacheCluster;
 
   @NotNull
   @Valid
   @JsonProperty
-  private RedisClusterConfiguration metricsCluster;
+  private FaultTolerantRedisClientFactory pubsub;
 
   @NotNull
   @Valid
@@ -132,36 +145,25 @@ public class WhisperServerConfiguration extends Configuration {
   @Valid
   @JsonProperty
   private SecureValueRecovery2Configuration svr2;
+  @NotNull
+  @Valid
+  @JsonProperty
+  private SecureValueRecovery3Configuration svr3;
 
   @NotNull
   @Valid
   @JsonProperty
-  private AccountDatabaseCrawlerConfiguration accountDatabaseCrawler;
+  private FaultTolerantRedisClusterFactory pushSchedulerCluster;
 
   @NotNull
   @Valid
   @JsonProperty
-  private RedisClusterConfiguration pushSchedulerCluster;
-
-  @NotNull
-  @Valid
-  @JsonProperty
-  private RedisClusterConfiguration rateLimitersCluster;
+  private FaultTolerantRedisClusterFactory rateLimitersCluster;
 
   @NotNull
   @Valid
   @JsonProperty
   private MessageCacheConfiguration messageCache;
-
-  @NotNull
-  @Valid
-  @JsonProperty
-  private RedisClusterConfiguration clientPresenceCluster;
-
-  @Valid
-  @NotNull
-  @JsonProperty
-  private Set<String> testDevices = new HashSet<>();
 
   @Valid
   @NotNull
@@ -196,27 +198,12 @@ public class WhisperServerConfiguration extends Configuration {
   @Valid
   @NotNull
   @JsonProperty
-  private RecaptchaConfiguration recaptcha;
-
-  @Valid
-  @NotNull
-  @JsonProperty
-  private HCaptchaConfiguration hCaptcha;
-
-  @Valid
-  @NotNull
-  @JsonProperty
   private ShortCodeExpanderConfiguration shortCode;
 
   @Valid
   @NotNull
   @JsonProperty
   private SecureStorageServiceConfiguration storageService;
-
-  @Valid
-  @NotNull
-  @JsonProperty
-  private SecureBackupServiceConfiguration backupService;
 
   @Valid
   @NotNull
@@ -236,7 +223,12 @@ public class WhisperServerConfiguration extends Configuration {
   @Valid
   @NotNull
   @JsonProperty
-  private GenericZkConfig genericZkConfig;
+  private GenericZkConfig callingZkConfig;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private GenericZkConfig backupsZkConfig;
 
   @Valid
   @NotNull
@@ -246,7 +238,7 @@ public class WhisperServerConfiguration extends Configuration {
   @Valid
   @NotNull
   @JsonProperty
-  private AppConfigConfiguration appConfig;
+  private S3ObjectMonitorFactory dynamicConfig;
 
   @Valid
   @NotNull
@@ -270,27 +262,22 @@ public class WhisperServerConfiguration extends Configuration {
 
   @Valid
   @JsonProperty
-  private SpamFilterConfiguration spamFilterConfiguration;
+  private SpamFilterConfiguration spamFilter;
 
   @Valid
   @NotNull
   @JsonProperty
-  private RegistrationServiceConfiguration registrationService;
+  private RegistrationServiceClientFactory registrationService;
 
   @Valid
   @NotNull
   @JsonProperty
-  private TurnSecretConfiguration turn;
+  private TurnConfiguration turn;
 
   @Valid
   @NotNull
   @JsonProperty
   private TusConfiguration tus;
-
-  @Valid
-  @NotNull
-  @JsonProperty
-  private int grpcPort;
 
   @Valid
   @NotNull
@@ -305,15 +292,55 @@ public class WhisperServerConfiguration extends Configuration {
   @Valid
   @NotNull
   @JsonProperty
-  private CommandStopListenerConfiguration commandStopListener;
+  private LinkDeviceSecretConfiguration linkDevice;
 
   @Valid
   @NotNull
   @JsonProperty
-  private LinkDeviceSecretConfiguration linkDevice;
+  private VirtualThreadConfiguration virtualThread = new VirtualThreadConfiguration(Duration.ofMillis(1));
 
-  public AdminEventLoggingConfiguration getAdminEventLoggingConfiguration() {
-    return adminEventLoggingConfiguration;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private S3ObjectMonitorFactory maxmindCityDatabase;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private S3ObjectMonitorFactory callingTurnDnsRecords;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private S3ObjectMonitorFactory callingTurnPerformanceTable;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private S3ObjectMonitorFactory callingTurnManualTable;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private NoiseWebSocketTunnelConfiguration noiseTunnel;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private ExternalRequestFilterConfiguration externalRequestFilter;
+
+  @Valid
+  @NotNull
+  @JsonProperty
+  private KeyTransparencyServiceConfiguration keyTransparencyService;
+
+  public TlsKeyStoreConfiguration getTlsKeyStoreConfiguration() {
+    return tlsKeyStore;
+  }
+
+  public AwsCredentialsProviderFactory getAwsCredentialsConfiguration() {
+    return awsCredentialsProvider;
   }
 
   public StripeConfiguration getStripe() {
@@ -324,20 +351,20 @@ public class WhisperServerConfiguration extends Configuration {
     return braintree;
   }
 
-  public DynamoDbClientConfiguration getDynamoDbClientConfiguration() {
-    return dynamoDbClientConfiguration;
+  public GooglePlayBillingConfiguration getGooglePlayBilling() {
+    return googlePlayBilling;
+  }
+
+  public AppleAppStoreConfiguration getAppleAppStore() {
+    return appleAppStore;
+  }
+
+  public DynamoDbClientFactory getDynamoDbClientConfiguration() {
+    return dynamoDbClient;
   }
 
   public DynamoDbTables getDynamoDbTables() {
     return dynamoDbTables;
-  }
-
-  public RecaptchaConfiguration getRecaptchaConfiguration() {
-    return recaptcha;
-  }
-
-  public HCaptchaConfiguration getHCaptchaConfiguration() {
-    return hCaptcha;
   }
 
   public ShortCodeExpanderConfiguration getShortCodeRetrieverConfiguration() {
@@ -348,28 +375,23 @@ public class WhisperServerConfiguration extends Configuration {
     return webSocket;
   }
 
-  public AwsAttachmentsConfiguration getAwsAttachmentsConfiguration() {
-    return awsAttachments;
-  }
-
   public GcpAttachmentsConfiguration getGcpAttachmentsConfiguration() {
     return gcpAttachments;
   }
 
-  public RedisClusterConfiguration getCacheClusterConfiguration() {
+  public FaultTolerantRedisClusterFactory getCacheClusterConfiguration() {
     return cacheCluster;
   }
 
-  public RedisConfiguration getPubsubCacheConfiguration() {
+  public FaultTolerantRedisClientFactory getRedisPubSubConfiguration() {
     return pubsub;
-  }
-
-  public RedisClusterConfiguration getMetricsClusterConfiguration() {
-    return metricsCluster;
   }
 
   public SecureValueRecovery2Configuration getSvr2Configuration() {
     return svr2;
+  }
+  public SecureValueRecovery3Configuration getSvr3Configuration() {
+    return svr3;
   }
 
   public DirectoryV2Configuration getDirectoryV2Configuration() {
@@ -380,23 +402,15 @@ public class WhisperServerConfiguration extends Configuration {
     return storageService;
   }
 
-  public AccountDatabaseCrawlerConfiguration getAccountDatabaseCrawlerConfiguration() {
-    return accountDatabaseCrawler;
-  }
-
   public MessageCacheConfiguration getMessageCacheConfiguration() {
     return messageCache;
   }
 
-  public RedisClusterConfiguration getClientPresenceClusterConfiguration() {
-    return clientPresenceCluster;
-  }
-
-  public RedisClusterConfiguration getPushSchedulerCluster() {
+  public FaultTolerantRedisClusterFactory getPushSchedulerCluster() {
     return pushSchedulerCluster;
   }
 
-  public RedisClusterConfiguration getRateLimitersCluster() {
+  public FaultTolerantRedisClusterFactory getRateLimitersCluster() {
     return rateLimitersCluster;
   }
 
@@ -416,16 +430,16 @@ public class WhisperServerConfiguration extends Configuration {
     return cdn;
   }
 
+  public Cdn3StorageManagerConfiguration getCdn3StorageManagerConfiguration() {
+    return cdn3StorageManager;
+  }
+
   public DatadogConfiguration getDatadogConfiguration() {
-    return datadog;
+    return dogstatsd;
   }
 
   public UnidentifiedDeliveryConfiguration getDeliveryCertificate() {
     return unidentifiedDelivery;
-  }
-
-  public Set<String> getTestDevices() {
-    return testDevices;
   }
 
   public Map<String, Integer> getMaxDevices() {
@@ -437,10 +451,6 @@ public class WhisperServerConfiguration extends Configuration {
     }
 
     return results;
-  }
-
-  public SecureBackupServiceConfiguration getSecureBackupServiceConfiguration() {
-    return backupService;
   }
 
   public PaymentsServiceConfiguration getPaymentsServiceConfiguration() {
@@ -455,16 +465,20 @@ public class WhisperServerConfiguration extends Configuration {
     return zkConfig;
   }
 
-  public GenericZkConfig getGenericZkConfig() {
-    return genericZkConfig;
+  public GenericZkConfig getCallingZkConfig() {
+    return callingZkConfig;
+  }
+
+  public GenericZkConfig getBackupsZkConfig() {
+    return backupsZkConfig;
   }
 
   public RemoteConfigConfiguration getRemoteConfigConfiguration() {
     return remoteConfig;
   }
 
-  public AppConfigConfiguration getAppConfig() {
-    return appConfig;
+  public S3ObjectMonitorFactory getDynamicConfig() {
+    return dynamicConfig;
   }
 
   public BadgesConfiguration getBadges() {
@@ -484,23 +498,19 @@ public class WhisperServerConfiguration extends Configuration {
   }
 
   public SpamFilterConfiguration getSpamFilterConfiguration() {
-    return spamFilterConfiguration;
+    return spamFilter;
   }
 
-  public RegistrationServiceConfiguration getRegistrationServiceConfiguration() {
+  public RegistrationServiceClientFactory getRegistrationServiceConfiguration() {
     return registrationService;
   }
 
-  public TurnSecretConfiguration getTurnSecretConfiguration() {
+  public TurnConfiguration getTurnConfiguration() {
     return turn;
   }
 
   public TusConfiguration getTus() {
     return tus;
-  }
-
-  public int getGrpcPort() {
-    return grpcPort;
   }
 
   public ClientReleaseConfiguration getClientReleaseConfiguration() {
@@ -511,11 +521,39 @@ public class WhisperServerConfiguration extends Configuration {
     return messageByteLimitCardinalityEstimator;
   }
 
-  public CommandStopListenerConfiguration getCommandStopListener() {
-    return commandStopListener;
-  }
-
   public LinkDeviceSecretConfiguration getLinkDeviceSecretConfiguration() {
     return linkDevice;
+  }
+
+  public VirtualThreadConfiguration getVirtualThreadConfiguration() {
+    return virtualThread;
+  }
+
+  public S3ObjectMonitorFactory getMaxmindCityDatabase() {
+    return maxmindCityDatabase;
+  }
+
+  public S3ObjectMonitorFactory getCallingTurnDnsRecords() {
+    return callingTurnDnsRecords;
+  }
+
+  public S3ObjectMonitorFactory getCallingTurnPerformanceTable() {
+    return callingTurnPerformanceTable;
+  }
+
+  public S3ObjectMonitorFactory getCallingTurnManualTable() {
+    return callingTurnManualTable;
+  }
+
+  public NoiseWebSocketTunnelConfiguration getNoiseWebSocketTunnelConfiguration() {
+    return noiseTunnel;
+  }
+
+  public ExternalRequestFilterConfiguration getExternalRequestFilterConfiguration() {
+    return externalRequestFilter;
+  }
+
+  public KeyTransparencyServiceConfiguration getKeyTransparencyServiceConfiguration() {
+    return keyTransparencyService;
   }
 }

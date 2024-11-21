@@ -37,7 +37,7 @@ import org.whispersystems.textsecuregcm.tests.util.SynchronousExecutorService;
 
 class APNSenderTest {
 
-  private static final String DESTINATION_DEVICE_TOKEN = RandomStringUtils.randomAlphanumeric(32);
+  private static final String DESTINATION_DEVICE_TOKEN = RandomStringUtils.secure().nextAlphanumeric(32);
   private static final String BUNDLE_ID = "org.signal.test";
 
   private Account destinationAccount;
@@ -54,40 +54,8 @@ class APNSenderTest {
     apnsClient = mock(ApnsClient.class);
     apnSender = new APNSender(new SynchronousExecutorService(), apnsClient, BUNDLE_ID);
 
-    when(destinationAccount.getDevice(1)).thenReturn(Optional.of(destinationDevice));
+    when(destinationAccount.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(destinationDevice));
     when(destinationDevice.getApnId()).thenReturn(DESTINATION_DEVICE_TOKEN);
-  }
-
-  @ParameterizedTest
-  @ValueSource(booleans = {true, false})
-  void testSendVoip(final boolean urgent) {
-    PushNotificationResponse<SimpleApnsPushNotification> response = mock(PushNotificationResponse.class);
-    when(response.isAccepted()).thenReturn(true);
-
-    when(apnsClient.sendNotification(any(SimpleApnsPushNotification.class)))
-        .thenAnswer(
-            (Answer) invocationOnMock -> new MockPushNotificationFuture<>(invocationOnMock.getArgument(0), response));
-
-    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN_VOIP,
-        PushNotification.NotificationType.NOTIFICATION, null, destinationAccount, destinationDevice, urgent);
-
-    final SendPushNotificationResult result = apnSender.sendNotification(pushNotification).join();
-
-    ArgumentCaptor<SimpleApnsPushNotification> notification = ArgumentCaptor.forClass(SimpleApnsPushNotification.class);
-    verify(apnsClient).sendNotification(notification.capture());
-
-    assertThat(notification.getValue().getToken()).isEqualTo(DESTINATION_DEVICE_TOKEN);
-    assertThat(notification.getValue().getExpiration()).isEqualTo(APNSender.MAX_EXPIRATION);
-    assertThat(notification.getValue().getPayload()).isEqualTo(APNSender.APN_VOIP_NOTIFICATION_PAYLOAD);
-    // Delivery priority should always be `IMMEDIATE` for VOIP notifications
-    assertThat(notification.getValue().getPriority()).isEqualTo(DeliveryPriority.IMMEDIATE);
-    assertThat(notification.getValue().getTopic()).isEqualTo(BUNDLE_ID + ".voip");
-
-    assertThat(result.accepted()).isTrue();
-    assertThat(result.errorCode()).isNull();
-    assertThat(result.unregistered()).isFalse();
-
-    verifyNoMoreInteractions(apnsClient);
   }
 
   @ParameterizedTest
@@ -127,23 +95,24 @@ class APNSenderTest {
     }
 
     assertThat(result.accepted()).isTrue();
-    assertThat(result.errorCode()).isNull();
+    assertThat(result.errorCode()).isEmpty();
     assertThat(result.unregistered()).isFalse();
 
     verifyNoMoreInteractions(apnsClient);
   }
 
-  @Test
-  void testUnregisteredUser() {
+  @ParameterizedTest
+  @ValueSource(strings = {"Unregistered", "BadDeviceToken", "ExpiredToken"})
+  void testUnregisteredUser(final String rejectionReason) {
     PushNotificationResponse<SimpleApnsPushNotification> response = mock(PushNotificationResponse.class);
     when(response.isAccepted()).thenReturn(false);
-    when(response.getRejectionReason()).thenReturn(Optional.of("Unregistered"));
+    when(response.getRejectionReason()).thenReturn(Optional.of(rejectionReason));
 
     when(apnsClient.sendNotification(any(SimpleApnsPushNotification.class)))
         .thenAnswer(
             (Answer) invocationOnMock -> new MockPushNotificationFuture<>(invocationOnMock.getArgument(0), response));
 
-    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN_VOIP,
+    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN,
         PushNotification.NotificationType.NOTIFICATION, null, destinationAccount, destinationDevice, true);
 
     when(destinationDevice.getApnId()).thenReturn(DESTINATION_DEVICE_TOKEN);
@@ -156,11 +125,11 @@ class APNSenderTest {
 
     assertThat(notification.getValue().getToken()).isEqualTo(DESTINATION_DEVICE_TOKEN);
     assertThat(notification.getValue().getExpiration()).isEqualTo(APNSender.MAX_EXPIRATION);
-    assertThat(notification.getValue().getPayload()).isEqualTo(APNSender.APN_VOIP_NOTIFICATION_PAYLOAD);
+    assertThat(notification.getValue().getPayload()).isEqualTo(APNSender.APN_NSE_NOTIFICATION_PAYLOAD);
     assertThat(notification.getValue().getPriority()).isEqualTo(DeliveryPriority.IMMEDIATE);
 
     assertThat(result.accepted()).isFalse();
-    assertThat(result.errorCode()).isEqualTo("Unregistered");
+    assertThat(result.errorCode()).hasValue(rejectionReason);
     assertThat(result.unregistered()).isTrue();
   }
 
@@ -174,7 +143,7 @@ class APNSenderTest {
         .thenAnswer(
             (Answer) invocationOnMock -> new MockPushNotificationFuture<>(invocationOnMock.getArgument(0), response));
 
-    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN_VOIP,
+    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN,
         PushNotification.NotificationType.NOTIFICATION, null, destinationAccount, destinationDevice, true);
 
     final SendPushNotificationResult result = apnSender.sendNotification(pushNotification).join();
@@ -184,11 +153,11 @@ class APNSenderTest {
 
     assertThat(notification.getValue().getToken()).isEqualTo(DESTINATION_DEVICE_TOKEN);
     assertThat(notification.getValue().getExpiration()).isEqualTo(APNSender.MAX_EXPIRATION);
-    assertThat(notification.getValue().getPayload()).isEqualTo(APNSender.APN_VOIP_NOTIFICATION_PAYLOAD);
+    assertThat(notification.getValue().getPayload()).isEqualTo(APNSender.APN_NSE_NOTIFICATION_PAYLOAD);
     assertThat(notification.getValue().getPriority()).isEqualTo(DeliveryPriority.IMMEDIATE);
 
     assertThat(result.accepted()).isFalse();
-    assertThat(result.errorCode()).isEqualTo("BadTopic");
+    assertThat(result.errorCode()).hasValue("BadTopic");
     assertThat(result.unregistered()).isFalse();
   }
 
@@ -201,7 +170,7 @@ class APNSenderTest {
         .thenAnswer((Answer) invocationOnMock -> new MockPushNotificationFuture<>(invocationOnMock.getArgument(0),
             new IOException("lost connection")));
 
-    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN_VOIP,
+    PushNotification pushNotification = new PushNotification(DESTINATION_DEVICE_TOKEN, PushNotification.TokenType.APN,
         PushNotification.NotificationType.NOTIFICATION, null, destinationAccount, destinationDevice, true);
 
     assertThatThrownBy(() -> apnSender.sendNotification(pushNotification).join())

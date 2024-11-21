@@ -5,7 +5,9 @@
 
 package org.whispersystems.textsecuregcm.auth;
 
+import javax.annotation.Nullable;
 import java.util.List;
 
-public record TurnToken(String username, String password, List<String> urls) {
+public record TurnToken(String username, String password, List<String> urls, @Nullable List<String> urlsWithIps,
+                        @Nullable String hostname) {
 }

@@ -5,6 +5,7 @@
 
 package org.signal.integration;
 
+import io.micrometer.common.util.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.whispersystems.textsecuregcm.entities.CreateVerificationSessionRequest;
@@ -19,13 +20,18 @@ public class RegistrationTest {
   public void testRegistration() throws Exception {
     final UpdateVerificationSessionRequest originalRequest = new UpdateVerificationSessionRequest(
         "test", UpdateVerificationSessionRequest.PushTokenType.FCM, null, null, null, null);
-    final CreateVerificationSessionRequest input = new CreateVerificationSessionRequest("+19995550102", originalRequest);
+
+    final Operations.PrescribedVerificationNumber params = Operations.prescribedVerificationNumber();
+    final CreateVerificationSessionRequest input = new CreateVerificationSessionRequest(params.number(),
+        originalRequest);
 
     final VerificationSessionResponse verificationSessionResponse = Operations
         .apiPost("/v1/verification/session", input)
         .executeExpectSuccess(VerificationSessionResponse.class);
 
     final String sessionId = verificationSessionResponse.id();
+    Assertions.assertTrue(StringUtils.isNotBlank(sessionId));
+
     final String pushChallenge = Operations.peekVerificationSessionPushChallenge(sessionId);
 
     // supply push challenge
@@ -46,7 +52,8 @@ public class RegistrationTest {
         .executeExpectSuccess(VerificationSessionResponse.class);
 
     // verify code
-    final SubmitVerificationCodeRequest submitVerificationCodeRequest = new SubmitVerificationCodeRequest("265402");
+    final SubmitVerificationCodeRequest submitVerificationCodeRequest = new SubmitVerificationCodeRequest(
+        params.verificationCode());
     final VerificationSessionResponse codeVerified = Operations
         .apiPut("/v1/verification/session/%s/code".formatted(sessionId), submitVerificationCodeRequest)
         .executeExpectSuccess(VerificationSessionResponse.class);

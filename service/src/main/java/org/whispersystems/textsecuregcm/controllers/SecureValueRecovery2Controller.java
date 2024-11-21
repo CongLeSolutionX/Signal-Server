@@ -5,35 +5,36 @@
 
 package org.whispersystems.textsecuregcm.controllers;
 
+import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import javax.validation.Valid;
-import javax.validation.constraints.NotNull;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import org.jetbrains.annotations.TestOnly;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsSelector;
 import org.whispersystems.textsecuregcm.configuration.SecureValueRecovery2Configuration;
 import org.whispersystems.textsecuregcm.entities.AuthCheckRequest;
-import org.whispersystems.textsecuregcm.entities.AuthCheckResponse;
+import org.whispersystems.textsecuregcm.entities.AuthCheckResponseV2;
 import org.whispersystems.textsecuregcm.limits.RateLimitedByIp;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.websocket.auth.ReadOnly;
 
 @Path("/v2/backup")
 @Tag(name = "Secure Value Recovery")
@@ -45,7 +46,7 @@ public class SecureValueRecovery2Controller {
     return credentialsGenerator(cfg, Clock.systemUTC());
   }
 
-  @TestOnly
+  @VisibleForTesting
   public static ExternalServiceCredentialsGenerator credentialsGenerator(final SecureValueRecovery2Configuration cfg, final Clock clock) {
     return ExternalServiceCredentialsGenerator
         .builder(cfg.userAuthenticationTokenSharedSecret())
@@ -77,7 +78,7 @@ public class SecureValueRecovery2Controller {
   )
   @ApiResponse(responseCode = "200", description = "`JSON` with generated credentials.", useReturnTypeSchema = true)
   @ApiResponse(responseCode = "401", description = "Account authentication check failed.")
-  public ExternalServiceCredentials getAuth(@Auth final AuthenticatedAccount auth) {
+  public ExternalServiceCredentials getAuth(@ReadOnly @Auth final AuthenticatedDevice auth) {
     return backupServiceCredentialGenerator.generateFor(auth.getAccount().getUuid().toString());
   }
 
@@ -99,9 +100,9 @@ public class SecureValueRecovery2Controller {
   @ApiResponse(responseCode = "200", description = "`JSON` with the check results.", useReturnTypeSchema = true)
   @ApiResponse(responseCode = "422", description = "Provided list of SVR2 credentials could not be parsed")
   @ApiResponse(responseCode = "400", description = "`POST` request body is not a valid `JSON`")
-  public AuthCheckResponse authCheck(@NotNull @Valid final AuthCheckRequest request) {
+  public AuthCheckResponseV2 authCheck(@NotNull @Valid final AuthCheckRequest request) {
     final List<ExternalServiceCredentialsSelector.CredentialInfo> credentials = ExternalServiceCredentialsSelector.check(
-        request.passwords(),
+        request.tokens(),
         backupServiceCredentialGenerator,
         MAX_AGE_SECONDS);
 
@@ -112,16 +113,16 @@ public class SecureValueRecovery2Controller {
         .map(backupServiceCredentialGenerator::generateForUuid)
         .map(ExternalServiceCredentials::username);
 
-    return new AuthCheckResponse(credentials.stream().collect(Collectors.toMap(
+    return new AuthCheckResponseV2(credentials.stream().collect(Collectors.toMap(
         ExternalServiceCredentialsSelector.CredentialInfo::token,
         info -> {
           if (!info.valid()) {
-            return AuthCheckResponse.Result.INVALID;
+            return AuthCheckResponseV2.Result.INVALID;
           }
           final String username = info.credentials().username();
           // does this credential match the account id for the e164 provided in the request?
           boolean match = matchingUsername.filter(username::equals).isPresent();
-          return match ? AuthCheckResponse.Result.MATCH : AuthCheckResponse.Result.NO_MATCH;
+          return match ? AuthCheckResponseV2.Result.MATCH : AuthCheckResponseV2.Result.NO_MATCH;
         }
     )));
   }

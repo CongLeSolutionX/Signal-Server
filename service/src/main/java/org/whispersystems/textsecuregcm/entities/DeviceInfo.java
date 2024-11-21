@@ -5,25 +5,21 @@
 
 package org.whispersystems.textsecuregcm.entities;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import org.whispersystems.textsecuregcm.storage.Device;
+import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
 
-public class DeviceInfo {
-  @JsonProperty
-  private long id;
+public record DeviceInfo(long id,
 
-  @JsonProperty
-  private String name;
+                         @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+                         @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+                         byte[] name,
 
-  @JsonProperty
-  private long lastSeen;
+                         long lastSeen,
+                         long created) {
 
-  @JsonProperty
-  private long created;
-
-  public DeviceInfo(long id, String name, long lastSeen, long created) {
-    this.id       = id;
-    this.name     = name;
-    this.lastSeen = lastSeen;
-    this.created  = created;
+  public static DeviceInfo forDevice(final Device device) {
+    return new DeviceInfo(device.getId(), device.getName(), device.getLastSeen(), device.getCreated());
   }
 }

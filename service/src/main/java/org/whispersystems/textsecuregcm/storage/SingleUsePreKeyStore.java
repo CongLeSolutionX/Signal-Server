@@ -6,22 +6,21 @@
 package org.whispersystems.textsecuregcm.storage;
 
 import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
+import static org.whispersystems.textsecuregcm.storage.AbstractDynamoDbStore.DYNAMO_DB_MAX_BATCH_SIZE;
 
-import com.google.common.annotations.VisibleForTesting;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import java.nio.ByteBuffer;
 import java.time.Duration;
-import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.entities.PreKey;
 import org.whispersystems.textsecuregcm.util.AttributeValues;
 import org.whispersystems.textsecuregcm.util.Util;
@@ -33,17 +32,15 @@ import software.amazon.awssdk.services.dynamodb.model.DeleteItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.DeleteItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
-import software.amazon.awssdk.services.dynamodb.model.QueryResponse;
 import software.amazon.awssdk.services.dynamodb.model.ReturnValue;
-import software.amazon.awssdk.services.dynamodb.model.Select;
 
 /**
  * A single-use pre-key store stores single-use pre-keys of a specific type. Keys returned by a single-use pre-key
- * store's {@link #take(UUID, long)} method are guaranteed to be returned exactly once, and repeated calls will never
+ * store's {@link #take(UUID, byte)} method are guaranteed to be returned exactly once, and repeated calls will never
  * yield the same key.
  * <p/>
  * Each {@link Account} may have one or more {@link Device devices}. Clients <em>should</em> regularly check their
- * supply of single-use pre-keys (see {@link #getCount(UUID, long)}) and upload new keys when their supply runs low. In
+ * supply of single-use pre-keys (see {@link #getCount(UUID, byte)}) and upload new keys when their supply runs low. In
  * the event that a party wants to begin a session with a device that has no single-use pre-keys remaining, that party
  * may fall back to using the device's repeated-use ("last-resort") signed pre-key instead.
  */
@@ -52,11 +49,13 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
   private final DynamoDbAsyncClient dynamoDbAsyncClient;
   private final String tableName;
 
+  private final Timer getKeyCountTimer = Metrics.timer(name(getClass(), "getCount"));
   private final Timer storeKeyTimer = Metrics.timer(name(getClass(), "storeKey"));
   private final Timer storeKeyBatchTimer = Metrics.timer(name(getClass(), "storeKeyBatch"));
-  private final Timer getKeyCountTimer = Metrics.timer(name(getClass(), "getCount"));
   private final Timer deleteForDeviceTimer = Metrics.timer(name(getClass(), "deleteForDevice"));
   private final Timer deleteForAccountTimer = Metrics.timer(name(getClass(), "deleteForAccount"));
+
+  private final Counter noKeyCountAvailableCounter = Metrics.counter(name(getClass(), "noKeyCountAvailable"));
 
   final DistributionSummary keysConsideredForTakeDistributionSummary = DistributionSummary
       .builder(name(getClass(), "keysConsideredForTake"))
@@ -77,6 +76,7 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
   static final String KEY_DEVICE_ID_KEY_ID = "DK";
   static final String ATTR_PUBLIC_KEY = "P";
   static final String ATTR_SIGNATURE = "S";
+  static final String ATTR_REMAINING_KEYS = "R";
 
   protected SingleUsePreKeyStore(final DynamoDbAsyncClient dynamoDbAsyncClient, final String tableName) {
     this.dynamoDbAsyncClient = dynamoDbAsyncClient;
@@ -94,23 +94,28 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
    * @return a future that completes when all previously-stored keys have been removed and the given collection of
    * pre-keys has been stored in its place
    */
-  public CompletableFuture<Void> store(final UUID identifier, final long deviceId, final List<K> preKeys) {
+  public CompletableFuture<Void> store(final UUID identifier, final byte deviceId, final List<K> preKeys) {
     final Timer.Sample sample = Timer.start();
 
-    return delete(identifier, deviceId)
-        .thenCompose(ignored -> CompletableFuture.allOf(preKeys.stream()
-            .map(preKey -> store(identifier, deviceId, preKey))
-            .toList()
-            .toArray(new CompletableFuture[0])))
+    return Mono.fromFuture(() -> delete(identifier, deviceId))
+        .thenMany(
+            Flux.fromIterable(preKeys)
+                .sort(Comparator.comparing(preKey -> preKey.keyId()))
+                .zipWith(Flux.range(0, preKeys.size()).map(i -> preKeys.size() - i))
+                .flatMap(preKeyAndRemainingCount -> Mono.fromFuture(() ->
+                        store(identifier, deviceId, preKeyAndRemainingCount.getT1(), preKeyAndRemainingCount.getT2())),
+                    DYNAMO_DB_MAX_BATCH_SIZE))
+        .then()
+        .toFuture()
         .thenRun(() -> sample.stop(storeKeyBatchTimer));
   }
 
-  private CompletableFuture<Void> store(final UUID identifier, final long deviceId, final K preKey) {
+  private CompletableFuture<Void> store(final UUID identifier, final byte deviceId, final K preKey, final int remainingKeys) {
     final Timer.Sample sample = Timer.start();
 
     return dynamoDbAsyncClient.putItem(PutItemRequest.builder()
             .tableName(tableName)
-            .item(getItemFromPreKey(identifier, deviceId, preKey))
+            .item(getItemFromPreKey(identifier, deviceId, preKey, remainingKeys))
             .build())
         .thenRun(() -> sample.stop(storeKeyTimer));
   }
@@ -126,7 +131,7 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
    * @return a future that yields a single-use pre-key if one is available or empty if no single-use pre-keys are
    * available for the target device
    */
-  public CompletableFuture<Optional<K>> take(final UUID identifier, final long deviceId) {
+  public CompletableFuture<Optional<K>> take(final UUID identifier, final byte deviceId) {
     final Timer.Sample sample = Timer.start();
     final AttributeValue partitionKey = getPartitionKey(identifier);
     final AtomicInteger keysConsidered = new AtomicInteger(0);
@@ -149,7 +154,7 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
                 KEY_DEVICE_ID_KEY_ID, item.get(KEY_DEVICE_ID_KEY_ID)))
             .returnValues(ReturnValue.ALL_OLD)
             .build())
-        .flatMap(deleteItemRequest -> Mono.fromFuture(dynamoDbAsyncClient.deleteItem(deleteItemRequest)), 1)
+        .flatMap(deleteItemRequest -> Mono.fromFuture(() -> dynamoDbAsyncClient.deleteItem(deleteItemRequest)), 1)
         .doOnNext(deleteItemResponse -> keysConsidered.incrementAndGet())
         .filter(DeleteItemResponse::hasAttributes)
         .next()
@@ -171,27 +176,37 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
    * @return a future that yields the approximate number of single-use pre-keys currently available for the target
    * device
    */
-  public CompletableFuture<Integer> getCount(final UUID identifier, final long deviceId) {
+  public CompletableFuture<Integer> getCount(final UUID identifier, final byte deviceId) {
     final Timer.Sample sample = Timer.start();
 
-    // Getting an accurate count from DynamoDB can be very confusing. See:
-    //
-    // - https://github.com/aws/aws-sdk-java/issues/693
-    // - https://github.com/aws/aws-sdk-java/issues/915
-    // - https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Query.html#Query.Count
-    return Flux.from(dynamoDbAsyncClient.queryPaginator(QueryRequest.builder()
+    return dynamoDbAsyncClient.query(QueryRequest.builder()
             .tableName(tableName)
+            .consistentRead(false)
             .keyConditionExpression("#uuid = :uuid AND begins_with (#sort, :sortprefix)")
             .expressionAttributeNames(Map.of("#uuid", KEY_ACCOUNT_UUID, "#sort", KEY_DEVICE_ID_KEY_ID))
             .expressionAttributeValues(Map.of(
                 ":uuid", getPartitionKey(identifier),
                 ":sortprefix", getSortKeyPrefix(deviceId)))
-            .select(Select.COUNT)
-            .consistentRead(false)
-            .build()))
-        .map(QueryResponse::count)
-        .reduce(0, Integer::sum)
-        .toFuture()
+            .projectionExpression(ATTR_REMAINING_KEYS)
+            .limit(1)
+            .build())
+        .thenApply(response -> {
+          if (response.count() > 0) {
+            final Map<String, AttributeValue> item = response.items().getFirst();
+
+            if (item.containsKey(ATTR_REMAINING_KEYS)) {
+              return Integer.parseInt(item.get(ATTR_REMAINING_KEYS).n());
+            } else {
+              // Some legacy keys sets may not have pre-counted keys; in that case, we'll tell the owners of those key
+              // sets that they have none remaining, prompting an upload of a fresh set that we'll pre-count. This has
+              // no effect on consumers of keys, which will still be able to take keys if any are actually present.
+              noKeyCountAvailableCounter.increment();
+              return 0;
+            }
+          } else {
+            return 0;
+          }
+        })
         .whenComplete((keyCount, throwable) -> {
           sample.stop(getKeyCountTimer);
 
@@ -232,7 +247,7 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
 
    * @return a future that completes when all single-use pre-keys have been removed for the target device
    */
-  public CompletableFuture<Void> delete(final UUID identifier, final long deviceId) {
+  public CompletableFuture<Void> delete(final UUID identifier, final byte deviceId) {
     final Timer.Sample sample = Timer.start();
 
     return deleteItems(getPartitionKey(identifier), Flux.from(dynamoDbAsyncClient.queryPaginator(QueryRequest.builder()
@@ -258,9 +273,8 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
                 KEY_DEVICE_ID_KEY_ID, item.get(KEY_DEVICE_ID_KEY_ID)
             ))
             .build())
-        .flatMap(deleteItemRequest -> Mono.fromFuture(dynamoDbAsyncClient.deleteItem(deleteItemRequest)))
-        // Idiom: wait for everything to finish, but discard the results
-        .reduce(0, (a, b) -> 0)
+        .flatMap(deleteItemRequest -> Mono.fromFuture(() -> dynamoDbAsyncClient.deleteItem(deleteItemRequest)), DYNAMO_DB_MAX_BATCH_SIZE)
+        .then()
         .toFuture()
         .thenRun(Util.NOOP);
   }
@@ -269,21 +283,23 @@ public abstract class SingleUsePreKeyStore<K extends PreKey<?>> {
     return AttributeValues.fromUUID(accountUuid);
   }
 
-  protected static AttributeValue getSortKey(final long deviceId, final long keyId) {
+  protected static AttributeValue getSortKey(final byte deviceId, final long keyId) {
     final ByteBuffer byteBuffer = ByteBuffer.wrap(new byte[16]);
     byteBuffer.putLong(deviceId);
     byteBuffer.putLong(keyId);
     return AttributeValues.fromByteBuffer(byteBuffer.flip());
   }
 
-  private static AttributeValue getSortKeyPrefix(final long deviceId) {
+  private static AttributeValue getSortKeyPrefix(final byte deviceId) {
     final ByteBuffer byteBuffer = ByteBuffer.wrap(new byte[8]);
     byteBuffer.putLong(deviceId);
     return AttributeValues.fromByteBuffer(byteBuffer.flip());
   }
 
-  protected abstract Map<String, AttributeValue> getItemFromPreKey(final UUID identifier, final long deviceId,
-      final K preKey);
+  protected abstract Map<String, AttributeValue> getItemFromPreKey(final UUID identifier,
+      final byte deviceId,
+      final K preKey,
+      final int remainingKeys);
 
   protected abstract K getPreKeyFromItem(final Map<String, AttributeValue> item);
 }

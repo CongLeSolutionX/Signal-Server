@@ -1,91 +1,151 @@
+/*
+ * Copyright 2023 Signal Messenger, LLC
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 package org.whispersystems.textsecuregcm.grpc;
 
-import com.google.i18n.phonenumbers.PhoneNumberUtil;
-import com.google.i18n.phonenumbers.Phonenumber;
-import com.google.protobuf.ByteString;
-import io.grpc.ServerInterceptors;
-import io.grpc.Status;
-import io.grpc.StatusRuntimeException;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.ArgumentCaptor;
-import org.signal.chat.profile.SetProfileRequest.AvatarChange;
-import org.signal.chat.profile.ProfileGrpc;
-import org.signal.chat.profile.SetProfileRequest;
-import org.signal.chat.profile.SetProfileResponse;
-import org.signal.libsignal.protocol.ServiceId;
-import org.signal.libsignal.zkgroup.InvalidInputException;
-import org.signal.libsignal.zkgroup.profiles.ProfileKey;
-import org.whispersystems.textsecuregcm.auth.grpc.MockAuthenticationInterceptor;
-import org.whispersystems.textsecuregcm.configuration.BadgeConfiguration;
-import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicPaymentsConfiguration;
-import org.whispersystems.textsecuregcm.entities.BadgeSvg;
-import org.whispersystems.textsecuregcm.s3.PolicySigner;
-import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
-import org.whispersystems.textsecuregcm.storage.Account;
-import org.whispersystems.textsecuregcm.storage.AccountsManager;
-import org.whispersystems.textsecuregcm.storage.Device;
-import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
-import org.whispersystems.textsecuregcm.storage.ProfilesManager;
-import org.whispersystems.textsecuregcm.storage.VersionedProfile;
-import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
-import software.amazon.awssdk.services.s3.S3AsyncClient;
-import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
-import java.time.Clock;
-import java.util.Base64;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.stream.Stream;
-
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.AssertionsForClassTypes.assertThatNoException;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.whispersystems.textsecuregcm.grpc.GrpcTestUtils.assertRateLimitExceeded;
+import static org.whispersystems.textsecuregcm.grpc.GrpcTestUtils.assertStatusException;
 
-public class ProfileGrpcServiceTest {
-  private static final UUID AUTHENTICATED_ACI = UUID.randomUUID();
-  private static final long AUTHENTICATED_DEVICE_ID = Device.MASTER_ID;
+import com.google.i18n.phonenumbers.PhoneNumberUtil;
+import com.google.i18n.phonenumbers.Phonenumber;
+import com.google.protobuf.ByteString;
+import io.grpc.Status;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Stream;
+import javax.annotation.Nullable;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.signal.chat.common.IdentityType;
+import org.signal.chat.common.ServiceIdentifier;
+import org.signal.chat.profile.CredentialType;
+import org.signal.chat.profile.GetExpiringProfileKeyCredentialRequest;
+import org.signal.chat.profile.GetExpiringProfileKeyCredentialResponse;
+import org.signal.chat.profile.GetUnversionedProfileRequest;
+import org.signal.chat.profile.GetUnversionedProfileResponse;
+import org.signal.chat.profile.GetVersionedProfileRequest;
+import org.signal.chat.profile.GetVersionedProfileResponse;
+import org.signal.chat.profile.ProfileGrpc;
+import org.signal.chat.profile.SetProfileRequest;
+import org.signal.chat.profile.SetProfileRequest.AvatarChange;
+import org.signal.chat.profile.SetProfileResponse;
+import org.signal.libsignal.protocol.IdentityKey;
+import org.signal.libsignal.protocol.ServiceId;
+import org.signal.libsignal.protocol.ecc.Curve;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.signal.libsignal.zkgroup.InvalidInputException;
+import org.signal.libsignal.zkgroup.ServerPublicParams;
+import org.signal.libsignal.zkgroup.ServerSecretParams;
+import org.signal.libsignal.zkgroup.VerificationFailedException;
+import org.signal.libsignal.zkgroup.profiles.ClientZkProfileOperations;
+import org.signal.libsignal.zkgroup.profiles.ExpiringProfileKeyCredentialResponse;
+import org.signal.libsignal.zkgroup.profiles.ProfileKey;
+import org.signal.libsignal.zkgroup.profiles.ProfileKeyCommitment;
+import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredentialRequest;
+import org.signal.libsignal.zkgroup.profiles.ProfileKeyCredentialRequestContext;
+import org.signal.libsignal.zkgroup.profiles.ServerZkProfileOperations;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessChecksum;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
+import org.whispersystems.textsecuregcm.badges.ProfileBadgeConverter;
+import org.whispersystems.textsecuregcm.configuration.BadgeConfiguration;
+import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicPaymentsConfiguration;
+import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
+import org.whispersystems.textsecuregcm.entities.Badge;
+import org.whispersystems.textsecuregcm.entities.BadgeSvg;
+import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
+import org.whispersystems.textsecuregcm.identity.PniServiceIdentifier;
+import org.whispersystems.textsecuregcm.limits.RateLimiter;
+import org.whispersystems.textsecuregcm.limits.RateLimiters;
+import org.whispersystems.textsecuregcm.s3.PolicySigner;
+import org.whispersystems.textsecuregcm.s3.PostPolicyGenerator;
+import org.whispersystems.textsecuregcm.storage.Account;
+import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
+import org.whispersystems.textsecuregcm.storage.ProfilesManager;
+import org.whispersystems.textsecuregcm.storage.VersionedProfile;
+import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
+import org.whispersystems.textsecuregcm.tests.util.ProfileTestHelper;
+import org.whispersystems.textsecuregcm.util.MockUtils;
+import org.whispersystems.textsecuregcm.util.TestRandomUtil;
+import org.whispersystems.textsecuregcm.util.UUIDUtil;
+import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
+import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
+import reactor.core.publisher.Mono;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+
+public class ProfileGrpcServiceTest extends SimpleBaseGrpcTest<ProfileGrpcService, ProfileGrpc.ProfileBlockingStub> {
+
   private static final String S3_BUCKET = "profileBucket";
+
   private static final String VERSION = "someVersion";
+
   private static final byte[] VALID_NAME = new byte[81];
+
+  @Mock
+  private AccountsManager accountsManager;
+
+  @Mock
   private ProfilesManager profilesManager;
+
+  @Mock
   private DynamicPaymentsConfiguration dynamicPaymentsConfiguration;
+
+  @Mock
   private S3AsyncClient asyncS3client;
+
+  @Mock
   private VersionedProfile profile;
+
+  @Mock
   private Account account;
-  private ProfileGrpc.ProfileBlockingStub profileBlockingStub;
 
-  @RegisterExtension
-  static final GrpcServerExtension GRPC_SERVER_EXTENSION = new GrpcServerExtension();
+  @Mock
+  private RateLimiter rateLimiter;
 
-  @BeforeEach
-  void setup() {
-    profilesManager = mock(ProfilesManager.class);
-    dynamicPaymentsConfiguration = mock(DynamicPaymentsConfiguration.class);
-    asyncS3client = mock(S3AsyncClient.class);
-    profile = mock(VersionedProfile.class);
-    account = mock(Account.class);
+  @Mock
+  private ProfileBadgeConverter profileBadgeConverter;
 
-    final AccountsManager accountsManager = mock(AccountsManager.class);
+  @Mock
+  private ServerZkProfileOperations serverZkProfileOperations;
+
+  @Override
+  protected ProfileGrpcService createServiceBeforeEachTest() {
     @SuppressWarnings("unchecked") final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager = mock(DynamicConfigurationManager.class);
     final DynamicConfiguration dynamicConfiguration = mock(DynamicConfiguration.class);
     final PolicySigner policySigner = new PolicySigner("accessSecret", "us-west-1");
@@ -105,29 +165,21 @@ public class ProfileGrpcServiceTest {
         List.of("TEST1"),
         Map.of(1L, "TEST1", 2L, "TEST2", 3L, "TEST3")
     );
+    final RateLimiters rateLimiters = mock(RateLimiters.class);
     final String phoneNumber = PhoneNumberUtil.getInstance().format(
         PhoneNumberUtil.getInstance().getExampleNumber("US"),
         PhoneNumberUtil.PhoneNumberFormat.E164);
 
-    profileBlockingStub = ProfileGrpc.newBlockingStub(GRPC_SERVER_EXTENSION.getChannel());
+    getMockRequestAttributesInterceptor().setAcceptLanguage(Locale.LanguageRange.parse("en-us"));
 
-    final ProfileGrpcService profileGrpcService = new ProfileGrpcService(
-        Clock.systemUTC(),
-        accountsManager,
-        profilesManager,
-        dynamicConfigurationManager,
-        badgesConfiguration,
-        asyncS3client,
-        policyGenerator,
-        policySigner,
-        S3_BUCKET
-    );
+    try {
+      getMockRequestAttributesInterceptor().setUserAgent(UserAgentUtil.parseUserAgentString("Signal-Android/1.2.3"));
+    } catch (final UnrecognizedUserAgentException e) {
+      throw new IllegalArgumentException(e);
+    }
 
-    final MockAuthenticationInterceptor mockAuthenticationInterceptor = new MockAuthenticationInterceptor();
-    mockAuthenticationInterceptor.setAuthenticatedDevice(AUTHENTICATED_ACI, AUTHENTICATED_DEVICE_ID);
-
-    GRPC_SERVER_EXTENSION.getServiceRegistry()
-        .addService(ServerInterceptors.intercept(profileGrpcService, mockAuthenticationInterceptor));
+    when(rateLimiters.getProfileLimiter()).thenReturn(rateLimiter);
+    when(rateLimiter.validateReactive(any(UUID.class))).thenReturn(Mono.empty());
 
     when(dynamicConfigurationManager.getConfiguration()).thenReturn(dynamicConfiguration);
     when(dynamicConfiguration.getPaymentsConfiguration()).thenReturn(dynamicPaymentsConfiguration);
@@ -136,8 +188,8 @@ public class ProfileGrpcServiceTest {
     when(account.getNumber()).thenReturn(phoneNumber);
     when(account.getBadges()).thenReturn(Collections.emptyList());
 
-    when(profile.getPaymentAddress()).thenReturn(null);
-    when(profile.getAvatar()).thenReturn("");
+    when(profile.paymentAddress()).thenReturn(null);
+    when(profile.avatar()).thenReturn("");
 
     when(accountsManager.getByAccountIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
     when(accountsManager.updateAsync(any(), any())).thenReturn(CompletableFuture.completedFuture(null));
@@ -150,6 +202,21 @@ public class ProfileGrpcServiceTest {
     when(dynamicPaymentsConfiguration.getDisallowedPrefixes()).thenReturn(Collections.emptyList());
 
     when(asyncS3client.deleteObject(any(DeleteObjectRequest.class))).thenReturn(CompletableFuture.completedFuture(null));
+
+    return new ProfileGrpcService(
+        Clock.systemUTC(),
+        accountsManager,
+        profilesManager,
+        dynamicConfigurationManager,
+        badgesConfiguration,
+        asyncS3client,
+        policyGenerator,
+        policySigner,
+        profileBadgeConverter,
+        rateLimiters,
+        serverZkProfileOperations,
+        S3_BUCKET
+    );
   }
 
   @Test
@@ -158,6 +225,7 @@ public class ProfileGrpcServiceTest {
     final byte[] validAboutEmoji = new byte[60];
     final byte[] validAbout = new byte[540];
     final byte[] validPaymentAddress = new byte[582];
+    final byte[] validPhoneNumberSharing = new byte[29];
 
     final SetProfileRequest request = SetProfileRequest.newBuilder()
         .setVersion(VERSION)
@@ -166,11 +234,11 @@ public class ProfileGrpcServiceTest {
         .setAboutEmoji(ByteString.copyFrom(validAboutEmoji))
         .setAbout(ByteString.copyFrom(validAbout))
         .setPaymentAddress(ByteString.copyFrom(validPaymentAddress))
+        .setPhoneNumberSharing(ByteString.copyFrom(validPhoneNumberSharing))
         .setCommitment(ByteString.copyFrom(commitment))
         .build();
 
-    //noinspection ResultOfMethodCallIgnored
-    profileBlockingStub.setProfile(request);
+    authenticatedServiceStub().setProfile(request);
 
     final ArgumentCaptor<VersionedProfile> profileArgumentCaptor = ArgumentCaptor.forClass(VersionedProfile.class);
 
@@ -178,19 +246,20 @@ public class ProfileGrpcServiceTest {
 
     final VersionedProfile profile = profileArgumentCaptor.getValue();
 
-    assertThat(profile.getCommitment()).isEqualTo(commitment);
-    assertThat(profile.getAvatar()).isNull();
-    assertThat(profile.getVersion()).isEqualTo(VERSION);
-    assertThat(profile.getName()).isEqualTo(encodeToBase64(VALID_NAME));
-    assertThat(profile.getAboutEmoji()).isEqualTo(encodeToBase64(validAboutEmoji));
-    assertThat(profile.getAbout()).isEqualTo(encodeToBase64(validAbout));
-    assertThat(profile.getPaymentAddress()).isEqualTo(encodeToBase64(validPaymentAddress));
+    assertThat(profile.commitment()).isEqualTo(commitment);
+    assertThat(profile.avatar()).isNull();
+    assertThat(profile.version()).isEqualTo(VERSION);
+    assertThat(profile.name()).isEqualTo(VALID_NAME);
+    assertThat(profile.aboutEmoji()).isEqualTo(validAboutEmoji);
+    assertThat(profile.about()).isEqualTo(validAbout);
+    assertThat(profile.paymentAddress()).isEqualTo(validPaymentAddress);
+    assertThat(profile.phoneNumberSharing()).isEqualTo(validPhoneNumberSharing);
   }
 
   @ParameterizedTest
   @MethodSource
-  void setProfileUpload(AvatarChange avatarChange, boolean hasPreviousProfile,
-      boolean expectHasS3UploadPath, boolean expectDeleteS3Object) throws InvalidInputException {
+  void setProfileUpload(final AvatarChange avatarChange, final boolean hasPreviousProfile,
+      final boolean expectHasS3UploadPath, final boolean expectDeleteS3Object) throws InvalidInputException {
     final String currentAvatar = "profiles/currentAvatar";
     final byte[] commitment = new ProfileKey(new byte[32]).getCommitment(new ServiceId.Aci(AUTHENTICATED_ACI)).serialize();
 
@@ -201,13 +270,13 @@ public class ProfileGrpcServiceTest {
         .setCommitment(ByteString.copyFrom(commitment))
         .build();
 
-    when(profile.getAvatar()).thenReturn(currentAvatar);
+    when(profile.avatar()).thenReturn(currentAvatar);
 
     when(profilesManager.getAsync(any(), anyString())).thenReturn(CompletableFuture.completedFuture(
         hasPreviousProfile ? Optional.of(profile) : Optional.empty()));
     when(profilesManager.setAsync(any(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
-    SetProfileResponse response = profileBlockingStub.setProfile(request);
+    final SetProfileResponse response = authenticatedServiceStub().setProfile(request);
 
     if (expectHasS3UploadPath) {
       assertTrue(response.getAttributes().getPath().startsWith("profiles/"));
@@ -244,11 +313,8 @@ public class ProfileGrpcServiceTest {
 
   @ParameterizedTest
   @MethodSource
-  void setProfileInvalidRequestData(SetProfileRequest request) {
-    final StatusRuntimeException exception =
-        assertThrows(StatusRuntimeException.class, () -> profileBlockingStub.setProfile(request));
-
-    assertEquals(Status.INVALID_ARGUMENT.getCode(), exception.getStatus().getCode());
+  void setProfileInvalidRequestData(final SetProfileRequest request) {
+    assertStatusException(Status.INVALID_ARGUMENT, () -> authenticatedServiceStub().setProfile(request));
   }
 
   private static Stream<Arguments> setProfileInvalidRequestData() throws InvalidInputException{
@@ -295,13 +361,13 @@ public class ProfileGrpcServiceTest {
 
   @ParameterizedTest
   @ValueSource(booleans = {true, false})
-  void setPaymentAddressDisallowedCountry(boolean hasExistingPaymentAddress) throws InvalidInputException {
+  void setPaymentAddressDisallowedCountry(final boolean hasExistingPaymentAddress) throws InvalidInputException {
     final Phonenumber.PhoneNumber disallowedPhoneNumber = PhoneNumberUtil.getInstance().getExampleNumber("CU");
     final byte[] commitment = new ProfileKey(new byte[32]).getCommitment(new ServiceId.Aci(AUTHENTICATED_ACI)).serialize();
 
     final byte[] validPaymentAddress = new byte[582];
     if (hasExistingPaymentAddress) {
-      when(profile.getPaymentAddress()).thenReturn(encodeToBase64(validPaymentAddress));
+      when(profile.paymentAddress()).thenReturn(validPaymentAddress);
     }
 
     final SetProfileRequest request = SetProfileRequest.newBuilder()
@@ -319,16 +385,352 @@ public class ProfileGrpcServiceTest {
     when(profilesManager.getAsync(any(), anyString())).thenReturn(CompletableFuture.completedFuture(Optional.of(profile)));
 
     if (hasExistingPaymentAddress) {
-      assertDoesNotThrow(() -> profileBlockingStub.setProfile(request),
+      assertDoesNotThrow(() -> authenticatedServiceStub().setProfile(request),
           "Payment address changes in disallowed countries should still be allowed if the account already has a valid payment address");
     } else {
-      final StatusRuntimeException exception =
-          assertThrows(StatusRuntimeException.class, () -> profileBlockingStub.setProfile(request));
-      assertEquals(Status.PERMISSION_DENIED.getCode(), exception.getStatus().getCode());
+      assertStatusException(Status.PERMISSION_DENIED, () -> authenticatedServiceStub().setProfile(request));
     }
   }
 
-  private static String encodeToBase64(byte[] input) {
-    return Base64.getEncoder().encodeToString(input);
+  @ParameterizedTest
+  @EnumSource(value = org.signal.chat.common.IdentityType.class, names = {"IDENTITY_TYPE_ACI", "IDENTITY_TYPE_PNI"})
+  void getUnversionedProfile(final IdentityType identityType) {
+    final UUID targetUuid = UUID.randomUUID();
+    final org.whispersystems.textsecuregcm.identity.ServiceIdentifier targetIdentifier =
+        identityType == IdentityType.IDENTITY_TYPE_ACI ? new AciServiceIdentifier(targetUuid) : new PniServiceIdentifier(targetUuid);
+
+    final GetUnversionedProfileRequest request = GetUnversionedProfileRequest.newBuilder()
+        .setServiceIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(identityType)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(targetUuid)))
+            .build())
+        .build();
+    final byte[] unidentifiedAccessKey = TestRandomUtil.nextBytes(UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH);
+    final ECKeyPair identityKeyPair = Curve.generateKeyPair();
+    final IdentityKey identityKey = new IdentityKey(identityKeyPair.getPublicKey());
+
+    final List<Badge> badges = List.of(new Badge(
+        "TEST",
+        "other",
+        "Test Badge",
+        "This badge is in unit tests.",
+        List.of("l", "m", "h", "x", "xx", "xxx"),
+        "SVG",
+        List.of(
+            new BadgeSvg("sl", "sd"),
+            new BadgeSvg("ml", "md"),
+            new BadgeSvg("ll", "ld")))
+    );
+
+    when(account.getIdentityKey(IdentityTypeUtil.fromGrpcIdentityType(identityType))).thenReturn(identityKey);
+    when(account.isUnrestrictedUnidentifiedAccess()).thenReturn(true);
+    when(account.getUnidentifiedAccessKey()).thenReturn(Optional.of(unidentifiedAccessKey));
+    when(account.getBadges()).thenReturn(Collections.emptyList());
+    when(account.hasCapability(any())).thenReturn(false);
+    when(account.hasCapability(DeviceCapability.DELETE_SYNC)).thenReturn(true);
+    when(profileBadgeConverter.convert(any(), any(), anyBoolean())).thenReturn(badges);
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+
+    final GetUnversionedProfileResponse response = authenticatedServiceStub().getUnversionedProfile(request);
+
+    final byte[] unidentifiedAccessChecksum = UnidentifiedAccessChecksum.generateFor(unidentifiedAccessKey);
+    final GetUnversionedProfileResponse prototypeExpectedResponse = GetUnversionedProfileResponse.newBuilder()
+        .setIdentityKey(ByteString.copyFrom(identityKey.serialize()))
+        .setUnidentifiedAccess(ByteString.copyFrom(unidentifiedAccessChecksum))
+        .setUnrestrictedUnidentifiedAccess(true)
+        .addCapabilities(org.signal.chat.common.DeviceCapability.DEVICE_CAPABILITY_DELETE_SYNC)
+        .addAllBadges(ProfileGrpcHelper.buildBadges(badges))
+        .build();
+
+    final GetUnversionedProfileResponse expectedResponse;
+    if (identityType == IdentityType.IDENTITY_TYPE_PNI) {
+      expectedResponse = GetUnversionedProfileResponse.newBuilder(prototypeExpectedResponse)
+          .clearUnidentifiedAccess()
+          .clearBadges()
+          .setUnrestrictedUnidentifiedAccess(false)
+          .build();
+    } else {
+      expectedResponse = prototypeExpectedResponse;
+    }
+
+    verify(rateLimiter).validateReactive(AUTHENTICATED_ACI);
+    verify(accountsManager).getByServiceIdentifierAsync(targetIdentifier);
+
+    assertEquals(expectedResponse, response);
+  }
+
+  @Test
+  void getUnversionedProfileTargetAccountNotFound() {
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.empty()));
+
+    final GetUnversionedProfileRequest request = GetUnversionedProfileRequest.newBuilder()
+        .setServiceIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .build();
+
+    assertStatusException(Status.NOT_FOUND, () -> authenticatedServiceStub().getUnversionedProfile(request));
+  }
+
+  @ParameterizedTest
+  @EnumSource(value = org.signal.chat.common.IdentityType.class, names = {"IDENTITY_TYPE_ACI", "IDENTITY_TYPE_PNI"})
+  void getUnversionedProfileRatelimited(final IdentityType identityType) {
+    final Duration retryAfterDuration = Duration.ofMinutes(7);
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+    when(rateLimiter.validateReactive(any(UUID.class)))
+        .thenReturn(Mono.error(new RateLimitExceededException(retryAfterDuration)));
+
+    final GetUnversionedProfileRequest request = GetUnversionedProfileRequest.newBuilder()
+        .setServiceIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(identityType)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .build();
+
+    assertRateLimitExceeded(retryAfterDuration, () -> authenticatedServiceStub().getUnversionedProfile(request), accountsManager);
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void getVersionedProfile(final String requestVersion, @Nullable final String accountVersion, final boolean expectResponseHasPaymentAddress) {
+    final VersionedProfile profile = mock(VersionedProfile.class);
+    final byte[] name = TestRandomUtil.nextBytes(81);
+    final byte[] emoji = TestRandomUtil.nextBytes(60);
+    final byte[] about = TestRandomUtil.nextBytes(156);
+    final byte[] paymentAddress = TestRandomUtil.nextBytes(582);
+    final String avatar = "profiles/" + ProfileTestHelper.generateRandomBase64FromByteArray(16);
+
+    final GetVersionedProfileRequest request = GetVersionedProfileRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .setVersion(requestVersion)
+        .build();
+
+    when(profile.name()).thenReturn(name);
+    when(profile.about()).thenReturn(about);
+    when(profile.aboutEmoji()).thenReturn(emoji);
+    when(profile.avatar()).thenReturn(avatar);
+    when(profile.paymentAddress()).thenReturn(paymentAddress);
+
+    when(account.getCurrentProfileVersion()).thenReturn(Optional.ofNullable(accountVersion));
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+    when(profilesManager.getAsync(any(), any())).thenReturn(CompletableFuture.completedFuture(Optional.of(profile)));
+
+    final GetVersionedProfileResponse response = authenticatedServiceStub().getVersionedProfile(request);
+
+    final GetVersionedProfileResponse.Builder expectedResponseBuilder = GetVersionedProfileResponse.newBuilder()
+        .setName(ByteString.copyFrom(name))
+        .setAbout(ByteString.copyFrom(about))
+        .setAboutEmoji(ByteString.copyFrom(emoji))
+        .setAvatar(avatar);
+
+    if (expectResponseHasPaymentAddress) {
+      expectedResponseBuilder.setPaymentAddress(ByteString.copyFrom(paymentAddress));
+    }
+
+    assertEquals(expectedResponseBuilder.build(), response);
+  }
+  private static Stream<Arguments> getVersionedProfile() {
+    return Stream.of(
+        Arguments.of("version1", "version1", true),
+        Arguments.of("version1", null, true),
+        Arguments.of("version1", "version2", false)
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void getVersionedProfileAccountOrProfileNotFound(final boolean missingAccount, final boolean missingProfile) {
+    final GetVersionedProfileRequest request = GetVersionedProfileRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .setVersion("versionWithNoProfile")
+        .build();
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(missingAccount ? Optional.empty() : Optional.of(account)));
+    when(profilesManager.getAsync(any(), any())).thenReturn(CompletableFuture.completedFuture(missingProfile ? Optional.empty() : Optional.of(profile)));
+
+    assertStatusException(Status.NOT_FOUND, () -> authenticatedServiceStub().getVersionedProfile(request));
+  }
+
+  private static Stream<Arguments> getVersionedProfileAccountOrProfileNotFound() {
+    return Stream.of(
+        Arguments.of(true, false),
+        Arguments.of(false, true)
+    );
+  }
+
+  @Test
+  void getVersionedProfileRatelimited() {
+    final Duration retryAfterDuration = MockUtils.updateRateLimiterResponseToFail(rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(7));
+
+    final GetVersionedProfileRequest request = GetVersionedProfileRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .setVersion("someVersion")
+        .build();
+
+    assertRateLimitExceeded(retryAfterDuration, () -> authenticatedServiceStub().getVersionedProfile(request), accountsManager, profilesManager);
+  }
+
+  @Test
+  void getVersionedProfilePniInvalidArgument() {
+    final GetVersionedProfileRequest request = GetVersionedProfileRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_PNI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .setVersion("someVersion")
+        .build();
+
+    assertStatusException(Status.INVALID_ARGUMENT, () -> authenticatedServiceStub().getVersionedProfile(request));
+  }
+
+  @Test
+  void getExpiringProfileKeyCredential() throws InvalidInputException, VerificationFailedException {
+    final UUID targetUuid = UUID.randomUUID();
+
+    final ServerSecretParams serverSecretParams = ServerSecretParams.generate();
+    final ServerPublicParams serverPublicParams = serverSecretParams.getPublicParams();
+
+    final ServerZkProfileOperations serverZkProfile = new ServerZkProfileOperations(serverSecretParams);
+    final ClientZkProfileOperations clientZkProfile = new ClientZkProfileOperations(serverPublicParams);
+
+    final byte[] profileKeyBytes = TestRandomUtil.nextBytes(32);
+    final ProfileKey profileKey = new ProfileKey(profileKeyBytes);
+    final ProfileKeyCommitment profileKeyCommitment = profileKey.getCommitment(new ServiceId.Aci(targetUuid));
+    final ProfileKeyCredentialRequestContext profileKeyCredentialRequestContext =
+        clientZkProfile.createProfileKeyCredentialRequestContext(new ServiceId.Aci(targetUuid), profileKey);
+
+    when(account.getUuid()).thenReturn(targetUuid);
+    when(profile.commitment()).thenReturn(profileKeyCommitment.serialize());
+    when(accountsManager.getByServiceIdentifierAsync(new AciServiceIdentifier(targetUuid))).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+    when(profilesManager.getAsync(targetUuid, "someVersion")).thenReturn(CompletableFuture.completedFuture(Optional.of(profile)));
+
+    final ProfileKeyCredentialRequest credentialRequest = profileKeyCredentialRequestContext.getRequest();
+
+    final Instant expiration = Instant.now().plus(org.whispersystems.textsecuregcm.util.ProfileHelper.EXPIRING_PROFILE_KEY_CREDENTIAL_EXPIRATION)
+        .truncatedTo(ChronoUnit.DAYS);
+
+    final ExpiringProfileKeyCredentialResponse credentialResponse =
+        serverZkProfile.issueExpiringProfileKeyCredential(credentialRequest, new ServiceId.Aci(targetUuid), profileKeyCommitment, expiration);
+
+    when(serverZkProfileOperations.issueExpiringProfileKeyCredential(credentialRequest, new ServiceId.Aci(targetUuid), profileKeyCommitment, expiration))
+        .thenReturn(credentialResponse);
+
+    final GetExpiringProfileKeyCredentialRequest request = GetExpiringProfileKeyCredentialRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(targetUuid)))
+            .build())
+        .setCredentialRequest(ByteString.copyFrom(credentialRequest.serialize()))
+        .setCredentialType(CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY)
+        .setVersion("someVersion")
+        .build();
+
+    final GetExpiringProfileKeyCredentialResponse response = authenticatedServiceStub().getExpiringProfileKeyCredential(request);
+
+    assertArrayEquals(credentialResponse.serialize(), response.getProfileKeyCredential().toByteArray());
+
+    verify(serverZkProfileOperations).issueExpiringProfileKeyCredential(credentialRequest, new ServiceId.Aci(targetUuid), profileKeyCommitment, expiration);
+
+    final ClientZkProfileOperations clientZkProfileCipher = new ClientZkProfileOperations(serverPublicParams);
+    assertThatNoException().isThrownBy(() ->
+        clientZkProfileCipher.receiveExpiringProfileKeyCredential(profileKeyCredentialRequestContext, new ExpiringProfileKeyCredentialResponse(response.getProfileKeyCredential().toByteArray())));
+  }
+
+  @Test
+  void getExpiringProfileKeyCredentialRateLimited() {
+    final Duration retryAfterDuration = MockUtils.updateRateLimiterResponseToFail(
+        rateLimiter, AUTHENTICATED_ACI, Duration.ofMinutes(5));
+    when(accountsManager.getByServiceIdentifierAsync(any())).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+
+    final GetExpiringProfileKeyCredentialRequest request = GetExpiringProfileKeyCredentialRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(UUID.randomUUID())))
+            .build())
+        .setCredentialRequest(ByteString.copyFrom("credentialRequest".getBytes(StandardCharsets.UTF_8)))
+        .setCredentialType(CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY)
+        .setVersion("someVersion")
+        .build();
+
+    assertRateLimitExceeded(retryAfterDuration, () -> authenticatedServiceStub().getExpiringProfileKeyCredential(request), profilesManager);
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void getExpiringProfileKeyCredentialAccountOrProfileNotFound(final boolean missingAccount,
+      final boolean missingProfile) {
+    final UUID targetUuid = UUID.randomUUID();
+
+    when(account.getUuid()).thenReturn(targetUuid);
+    when(accountsManager.getByServiceIdentifierAsync(new AciServiceIdentifier(targetUuid))).thenReturn(CompletableFuture.completedFuture(
+        missingAccount ? Optional.empty() : Optional.of(account)));
+    when(profilesManager.getAsync(targetUuid, "someVersion")).thenReturn(CompletableFuture.completedFuture(missingProfile ? Optional.empty() : Optional.of(profile)));
+
+    final GetExpiringProfileKeyCredentialRequest request = GetExpiringProfileKeyCredentialRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(IdentityType.IDENTITY_TYPE_ACI)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(targetUuid)))
+            .build())
+        .setCredentialRequest(ByteString.copyFrom("credentialRequest".getBytes(StandardCharsets.UTF_8)))
+        .setCredentialType(CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY)
+        .setVersion("someVersion")
+        .build();
+
+    assertStatusException(Status.NOT_FOUND, () -> authenticatedServiceStub().getExpiringProfileKeyCredential(request));
+  }
+
+  private static Stream<Arguments> getExpiringProfileKeyCredentialAccountOrProfileNotFound() {
+    return Stream.of(
+        Arguments.of(true, false),
+        Arguments.of(false, true)
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource
+  void getExpiringProfileKeyCredentialInvalidArgument(final IdentityType identityType, final CredentialType credentialType,
+      final boolean throwZkVerificationException) throws VerificationFailedException {
+    final UUID targetUuid = UUID.randomUUID();
+
+    if (throwZkVerificationException) {
+      when(serverZkProfileOperations.issueExpiringProfileKeyCredential(any(), any(), any(), any())).thenThrow(new VerificationFailedException());
+    }
+
+    when(account.getUuid()).thenReturn(targetUuid);
+    when(profile.commitment()).thenReturn("commitment".getBytes(StandardCharsets.UTF_8));
+    when(accountsManager.getByServiceIdentifierAsync(new AciServiceIdentifier(targetUuid))).thenReturn(CompletableFuture.completedFuture(Optional.of(account)));
+    when(profilesManager.getAsync(targetUuid, "someVersion")).thenReturn(CompletableFuture.completedFuture(Optional.of(profile)));
+
+    final GetExpiringProfileKeyCredentialRequest request = GetExpiringProfileKeyCredentialRequest.newBuilder()
+        .setAccountIdentifier(ServiceIdentifier.newBuilder()
+            .setIdentityType(identityType)
+            .setUuid(ByteString.copyFrom(UUIDUtil.toBytes(targetUuid)))
+            .build())
+        .setCredentialRequest(ByteString.copyFrom("credentialRequest".getBytes(StandardCharsets.UTF_8)))
+        .setCredentialType(credentialType)
+        .setVersion("someVersion")
+        .build();
+
+    assertStatusException(Status.INVALID_ARGUMENT, () -> authenticatedServiceStub().getExpiringProfileKeyCredential(request));
+  }
+
+  private static Stream<Arguments> getExpiringProfileKeyCredentialInvalidArgument() {
+    return Stream.of(
+        // Credential type unspecified
+        Arguments.of(IdentityType.IDENTITY_TYPE_ACI, CredentialType.CREDENTIAL_TYPE_UNSPECIFIED, false),
+        // Illegal identity type
+        Arguments.of(IdentityType.IDENTITY_TYPE_PNI, CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY, false),
+        // Artificially fails zero knowledge verification
+        Arguments.of(IdentityType.IDENTITY_TYPE_ACI, CredentialType.CREDENTIAL_TYPE_EXPIRING_PROFILE_KEY, true)
+    );
   }
 }

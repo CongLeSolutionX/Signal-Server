@@ -6,11 +6,12 @@
 package org.whispersystems.textsecuregcm.configuration.dynamic;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import javax.validation.Valid;
 import org.whispersystems.textsecuregcm.limits.RateLimiterConfig;
 
 public class DynamicConfiguration {
@@ -53,11 +54,23 @@ public class DynamicConfiguration {
 
   @JsonProperty
   @Valid
-  DynamicECPreKeyMigrationConfiguration ecPreKeyMigration = new DynamicECPreKeyMigrationConfiguration(true, false);
+  DynamicInboundMessageByteLimitConfiguration inboundMessageByteLimit = new DynamicInboundMessageByteLimitConfiguration(true);
 
   @JsonProperty
   @Valid
-  DynamicInboundMessageByteLimitConfiguration inboundMessageByteLimit = new DynamicInboundMessageByteLimitConfiguration(true);
+  DynamicRegistrationConfiguration registrationConfiguration = new DynamicRegistrationConfiguration(false);
+
+  @JsonProperty
+  @Valid
+  DynamicVirtualThreadConfiguration virtualThreads = new DynamicVirtualThreadConfiguration(Collections.emptySet());
+
+  @JsonProperty
+  @Valid
+  DynamicMetricsConfiguration metricsConfiguration = new DynamicMetricsConfiguration(false);
+
+  @JsonProperty
+  @Valid
+  List<String> svrStatusCodesToIgnoreForAccountDeletion = Collections.emptyList();
 
   public Optional<DynamicExperimentEnrollmentConfiguration> getExperimentEnrollmentConfiguration(
       final String experimentName) {
@@ -97,11 +110,24 @@ public class DynamicConfiguration {
     return rateLimitPolicy;
   }
 
-  public DynamicECPreKeyMigrationConfiguration getEcPreKeyMigrationConfiguration() {
-    return ecPreKeyMigration;
-  }
-
   public DynamicInboundMessageByteLimitConfiguration getInboundMessageByteLimitConfiguration() {
     return inboundMessageByteLimit;
   }
+
+  public DynamicRegistrationConfiguration getRegistrationConfiguration() {
+    return registrationConfiguration;
+  }
+
+  public DynamicVirtualThreadConfiguration getVirtualThreads() {
+    return virtualThreads;
+  }
+
+  public DynamicMetricsConfiguration getMetricsConfiguration() {
+    return metricsConfiguration;
+  }
+
+  public List<String> getSvrStatusCodesToIgnoreForAccountDeletion() {
+    return svrStatusCodesToIgnoreForAccountDeletion;
+  }
+
 }

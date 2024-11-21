@@ -19,12 +19,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import jakarta.ws.rs.WebApplicationException;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
-import javax.ws.rs.WebApplicationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -33,9 +33,9 @@ import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.entities.PhoneVerificationRequest;
 import org.whispersystems.textsecuregcm.limits.RateLimiter;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
 import org.whispersystems.textsecuregcm.storage.Device;
@@ -46,17 +46,18 @@ import org.whispersystems.textsecuregcm.util.Pair;
 class RegistrationLockVerificationManagerTest {
 
   private final AccountsManager accountsManager = mock(AccountsManager.class);
-  private final ClientPresenceManager clientPresenceManager = mock(ClientPresenceManager.class);
-  private final ExternalServiceCredentialsGenerator svr1CredentialsGenerator = mock(
-      ExternalServiceCredentialsGenerator.class);
+  private final DisconnectionRequestManager disconnectionRequestManager = mock(DisconnectionRequestManager.class);
   private final ExternalServiceCredentialsGenerator svr2CredentialsGenerator = mock(
+      ExternalServiceCredentialsGenerator.class);
+  private final ExternalServiceCredentialsGenerator svr3CredentialsGenerator = mock(
       ExternalServiceCredentialsGenerator.class);
   private final RegistrationRecoveryPasswordsManager registrationRecoveryPasswordsManager = mock(
       RegistrationRecoveryPasswordsManager.class);
   private static PushNotificationManager pushNotificationManager = mock(PushNotificationManager.class);
   private final RateLimiters rateLimiters = mock(RateLimiters.class);
   private final RegistrationLockVerificationManager registrationLockVerificationManager = new RegistrationLockVerificationManager(
-      accountsManager, clientPresenceManager, svr1CredentialsGenerator, svr2CredentialsGenerator, registrationRecoveryPasswordsManager, pushNotificationManager, rateLimiters);
+      accountsManager, disconnectionRequestManager, svr2CredentialsGenerator,
+      svr3CredentialsGenerator, registrationRecoveryPasswordsManager, pushNotificationManager, rateLimiters);
 
   private final RateLimiter pinLimiter = mock(RateLimiter.class);
 
@@ -67,13 +68,11 @@ class RegistrationLockVerificationManagerTest {
   void setUp() {
     clearInvocations(pushNotificationManager);
     when(rateLimiters.getPinLimiter()).thenReturn(pinLimiter);
-    when(svr1CredentialsGenerator.generateForUuid(any()))
-        .thenReturn(mock(ExternalServiceCredentials.class));
     when(svr2CredentialsGenerator.generateForUuid(any()))
         .thenReturn(mock(ExternalServiceCredentials.class));
 
     final Device device = mock(Device.class);
-    when(device.getId()).thenReturn(Device.MASTER_ID);
+    when(device.getId()).thenReturn(Device.PRIMARY_ID);
 
     AccountsHelper.setupMockUpdate(accountsManager);
 
@@ -108,7 +107,7 @@ class RegistrationLockVerificationManagerTest {
             } else {
               verify(registrationRecoveryPasswordsManager, never()).removeForNumber(account.getNumber());
             }
-            verify(clientPresenceManager).disconnectAllPresences(account.getUuid(), List.of(Device.MASTER_ID));
+            verify(disconnectionRequestManager).requestDisconnection(account.getUuid(), List.of(Device.PRIMARY_ID));
             try {
               verify(pushNotificationManager).sendAttemptLoginNotification(any(), eq("failedRegistrationLock"));
             } catch (NotPushRegisteredException npre) {}
@@ -131,7 +130,7 @@ class RegistrationLockVerificationManagerTest {
             verify(pushNotificationManager, never()).sendAttemptLoginNotification(any(), eq("failedRegistrationLock"));
           } catch (NotPushRegisteredException npre) {}
           verify(registrationRecoveryPasswordsManager, never()).removeForNumber(account.getNumber());
-          verify(clientPresenceManager, never()).disconnectAllPresences(account.getUuid(), List.of(Device.MASTER_ID));
+          verify(disconnectionRequestManager, never()).requestDisconnection(any(), any());
         });
       }
     };
@@ -169,7 +168,7 @@ class RegistrationLockVerificationManagerTest {
 
     verify(account, never()).lockAuthTokenHash();
     verify(registrationRecoveryPasswordsManager, never()).removeForNumber(account.getNumber());
-    verify(clientPresenceManager, never()).disconnectAllPresences(account.getUuid(), List.of(Device.MASTER_ID));
+    verify(disconnectionRequestManager, never()).requestDisconnection(any(), any());
   }
 
   static Stream<Arguments> testSuccess() {

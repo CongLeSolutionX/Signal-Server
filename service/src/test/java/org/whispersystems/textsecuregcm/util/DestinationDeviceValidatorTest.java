@@ -35,7 +35,7 @@ import org.whispersystems.textsecuregcm.storage.Device;
 @ExtendWith(DropwizardExtensionsSupport.class)
 class DestinationDeviceValidatorTest {
 
-  static Account mockAccountWithDeviceAndRegId(final Map<Long, Integer> registrationIdsByDeviceId) {
+  static Account mockAccountWithDeviceAndRegId(final Map<Byte, Integer> registrationIdsByDeviceId) {
     final Account account = mock(Account.class);
 
     registrationIdsByDeviceId.forEach((deviceId, registrationId) -> {
@@ -48,31 +48,34 @@ class DestinationDeviceValidatorTest {
   }
 
   static Stream<Arguments> validateRegistrationIdsSource() {
+    final byte id1 = 1;
+    final byte id2 = 2;
+    final byte id3 = 3;
     return Stream.of(
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 0xFFFF, 2L, 0xDEAD, 3L, 0xBEEF)),
-            Map.of(1L, 0xFFFF, 2L, 0xDEAD, 3L, 0xBEEF),
+            mockAccountWithDeviceAndRegId(Map.of(id1, 0xFFFF, id2, 0xDEAD, id3, 0xBEEF)),
+            Map.of(id1, 0xFFFF, id2, 0xDEAD, id3, 0xBEEF),
             null),
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 42)),
-            Map.of(1L, 1492),
-            Set.of(1L)),
+            mockAccountWithDeviceAndRegId(Map.of(id1, 42)),
+            Map.of(id1, 1492),
+            Set.of(id1)),
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 42)),
-            Map.of(1L, 42),
+            mockAccountWithDeviceAndRegId(Map.of(id1, 42)),
+            Map.of(id1, 42),
             null),
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 42)),
-            Map.of(1L, 0),
+            mockAccountWithDeviceAndRegId(Map.of(id1, 42)),
+            Map.of(id1, 0),
             null),
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 42, 2L, 255)),
-            Map.of(1L, 0, 2L, 42),
-            Set.of(2L)),
+            mockAccountWithDeviceAndRegId(Map.of(id1, 42, id2, 255)),
+            Map.of(id1, 0, id2, 42),
+            Set.of(id2)),
         arguments(
-            mockAccountWithDeviceAndRegId(Map.of(1L, 42, 2L, 256)),
-            Map.of(1L, 41, 2L, 257),
-            Set.of(1L, 2L))
+            mockAccountWithDeviceAndRegId(Map.of(id1, 42, id2, 256)),
+            Map.of(id1, 41, id2, 257),
+            Set.of(id1, id2))
     );
   }
 
@@ -80,8 +83,8 @@ class DestinationDeviceValidatorTest {
   @MethodSource("validateRegistrationIdsSource")
   void testValidateRegistrationIds(
       Account account,
-      Map<Long, Integer> registrationIdsByDeviceId,
-      Set<Long> expectedStaleDeviceIds) throws Exception {
+      Map<Byte, Integer> registrationIdsByDeviceId,
+      Set<Byte> expectedStaleDeviceIds) throws Exception {
     if (expectedStaleDeviceIds != null) {
       Assertions.assertThat(assertThrows(StaleDevicesException.class,
               () -> DestinationDeviceValidator.validateRegistrationIds(
@@ -98,13 +101,12 @@ class DestinationDeviceValidatorTest {
     }
   }
 
-  static Account mockAccountWithDeviceAndEnabled(final Map<Long, Boolean> enabledStateByDeviceId) {
+  static Account mockAccountWithDeviceAndEnabled(final Map<Byte, Boolean> enabledStateByDeviceId) {
     final Account account = mock(Account.class);
     final List<Device> devices = new ArrayList<>();
 
     enabledStateByDeviceId.forEach((deviceId, enabled) -> {
       final Device device = mock(Device.class);
-      when(device.isEnabled()).thenReturn(enabled);
       when(device.getId()).thenReturn(deviceId);
       when(account.getDevice(deviceId)).thenReturn(Optional.of(device));
 
@@ -116,64 +118,83 @@ class DestinationDeviceValidatorTest {
     return account;
   }
 
-  static Stream<Arguments> validateCompleteDeviceListSource() {
+  static Stream<Arguments> validateCompleteDeviceList() {
+    final byte id1 = 1;
+    final byte id2 = 2;
+    final byte id3 = 3;
+
+    final Account account = mockAccountWithDeviceAndEnabled(Map.of(id1, true, id2, false, id3, true));
+
     return Stream.of(
+        // Device IDs provided for all enabled devices
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(1L, 3L),
+            account,
+            Set.of(id1, id3),
+            Set.of(id2),
+            null,
+            Collections.emptySet()),
+
+        // Device ID provided for disabled device
+        arguments(
+            account,
+            Set.of(id1, id2, id3),
             null,
             null,
             Collections.emptySet()),
+
+        // Device ID omitted for enabled device
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(1L, 2L, 3L),
-            null,
-            Set.of(2L),
-            Collections.emptySet()),
-        arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(1L),
-            Set.of(3L),
+            account,
+            Set.of(id1),
+            Set.of(id2, id3),
             null,
             Collections.emptySet()),
+
+        // Device ID included for disabled device, omitted for enabled device
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(1L, 2L),
-            Set.of(3L),
-            Set.of(2L),
+            account,
+            Set.of(id1, id2),
+            Set.of(id3),
+            null,
             Collections.emptySet()),
+
+        // Device ID omitted for enabled device, included for device in excluded list
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(1L),
-            Set.of(3L),
-            Set.of(1L),
-            Set.of(1L)
+            account,
+            Set.of(id1),
+            Set.of(id2, id3),
+            Set.of(id1),
+            Set.of(id1)
         ),
+
+        // Device ID omitted for enabled device, included for disabled device, omitted for excluded device
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(2L),
-            Set.of(3L),
-            Set.of(2L),
-            Set.of(1L)
+            account,
+            Set.of(id2),
+            Set.of(id3),
+            null,
+            Set.of(id1)
         ),
+
+        // Device ID included for enabled device, omitted for excluded device
         arguments(
-            mockAccountWithDeviceAndEnabled(Map.of(1L, true, 2L, false, 3L, true)),
-            Set.of(3L),
+            account,
+            Set.of(id3),
+            Set.of(id2),
             null,
-            null,
-            Set.of(1L)
+            Set.of(id1)
         )
     );
   }
 
   @ParameterizedTest
-  @MethodSource("validateCompleteDeviceListSource")
-  void testValidateCompleteDeviceList(
+  @MethodSource
+  void validateCompleteDeviceList(
       Account account,
-      Set<Long> deviceIds,
-      Collection<Long> expectedMissingDeviceIds,
-      Collection<Long> expectedExtraDeviceIds,
-      Set<Long> excludedDeviceIds) throws Exception {
+      Set<Byte> deviceIds,
+      Collection<Byte> expectedMissingDeviceIds,
+      Collection<Byte> expectedExtraDeviceIds,
+      Set<Byte> excludedDeviceIds) throws Exception {
 
     if (expectedMissingDeviceIds != null || expectedExtraDeviceIds != null) {
       final MismatchedDevicesException mismatchedDevicesException = assertThrows(MismatchedDevicesException.class,
@@ -192,24 +213,24 @@ class DestinationDeviceValidatorTest {
 
   @Test
   void testDuplicateDeviceIds() {
-    final Account account = mockAccountWithDeviceAndRegId(Map.of(Device.MASTER_ID, 17));
+    final Account account = mockAccountWithDeviceAndRegId(Map.of(Device.PRIMARY_ID, 17));
     try {
       DestinationDeviceValidator.validateRegistrationIds(account,
-          Stream.of(new Pair<>(Device.MASTER_ID, 16), new Pair<>(Device.MASTER_ID, 17)), false);
+          Stream.of(new Pair<>(Device.PRIMARY_ID, 16), new Pair<>(Device.PRIMARY_ID, 17)), false);
       Assertions.fail("duplicate devices should throw StaleDevicesException");
     } catch (StaleDevicesException e) {
-      Assertions.assertThat(e.getStaleDevices()).hasSameElementsAs(Collections.singletonList(Device.MASTER_ID));
+      Assertions.assertThat(e.getStaleDevices()).hasSameElementsAs(Collections.singletonList(Device.PRIMARY_ID));
     }
   }
 
   @Test
   void testValidatePniRegistrationIds() {
     final Device device = mock(Device.class);
-    when(device.getId()).thenReturn(Device.MASTER_ID);
+    when(device.getId()).thenReturn(Device.PRIMARY_ID);
 
     final Account account = mock(Account.class);
     when(account.getDevices()).thenReturn(List.of(device));
-    when(account.getDevice(Device.MASTER_ID)).thenReturn(Optional.of(device));
+    when(account.getDevice(Device.PRIMARY_ID)).thenReturn(Optional.of(device));
 
     final int aciRegistrationId = 17;
     final int pniRegistrationId = 89;
@@ -220,33 +241,33 @@ class DestinationDeviceValidatorTest {
 
     assertDoesNotThrow(
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, aciRegistrationId)), false));
+            Stream.of(new Pair<>(Device.PRIMARY_ID, aciRegistrationId)), false));
     assertDoesNotThrow(
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, pniRegistrationId)),
+            Stream.of(new Pair<>(Device.PRIMARY_ID, pniRegistrationId)),
             true));
     assertThrows(StaleDevicesException.class,
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, aciRegistrationId)),
+            Stream.of(new Pair<>(Device.PRIMARY_ID, aciRegistrationId)),
             true));
     assertThrows(StaleDevicesException.class,
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, pniRegistrationId)),
+            Stream.of(new Pair<>(Device.PRIMARY_ID, pniRegistrationId)),
             false));
 
     when(device.getPhoneNumberIdentityRegistrationId()).thenReturn(OptionalInt.empty());
 
     assertDoesNotThrow(
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, aciRegistrationId)),
+            Stream.of(new Pair<>(Device.PRIMARY_ID, aciRegistrationId)),
             false));
     assertDoesNotThrow(
         () -> DestinationDeviceValidator.validateRegistrationIds(account,
-            Stream.of(new Pair<>(Device.MASTER_ID, aciRegistrationId)),
+            Stream.of(new Pair<>(Device.PRIMARY_ID, aciRegistrationId)),
             true));
     assertThrows(StaleDevicesException.class, () -> DestinationDeviceValidator.validateRegistrationIds(account,
-        Stream.of(new Pair<>(Device.MASTER_ID, incorrectRegistrationId)), true));
+        Stream.of(new Pair<>(Device.PRIMARY_ID, incorrectRegistrationId)), true));
     assertThrows(StaleDevicesException.class, () -> DestinationDeviceValidator.validateRegistrationIds(account,
-        Stream.of(new Pair<>(Device.MASTER_ID, incorrectRegistrationId)), false));
+        Stream.of(new Pair<>(Device.PRIMARY_ID, incorrectRegistrationId)), false));
   }
 }

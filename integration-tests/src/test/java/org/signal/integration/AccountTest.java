@@ -18,10 +18,10 @@ import org.signal.libsignal.usernames.Username;
 import org.whispersystems.textsecuregcm.entities.AccountIdentifierResponse;
 import org.whispersystems.textsecuregcm.entities.AccountIdentityResponse;
 import org.whispersystems.textsecuregcm.entities.ConfirmUsernameHashRequest;
-import org.whispersystems.textsecuregcm.entities.EncryptedUsername;
 import org.whispersystems.textsecuregcm.entities.ReserveUsernameHashRequest;
 import org.whispersystems.textsecuregcm.entities.ReserveUsernameHashResponse;
 import org.whispersystems.textsecuregcm.entities.UsernameHashResponse;
+import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 
 public class AccountTest {
 
@@ -40,7 +40,7 @@ public class AccountTest {
 
   @Test
   public void testCreateAccountAtomic() throws Exception {
-    final TestUser user = Operations.newRegisteredUserAtomic("+19995550201");
+    final TestUser user = Operations.newRegisteredUser("+19995550201");
     try {
       final Pair<Integer, AccountIdentityResponse> execute = Operations.apiGet("/v1/accounts/whoami")
           .authorized(user)
@@ -107,7 +107,7 @@ public class AccountTest {
     final AccountIdentifierResponse accountIdentifierResponse = Operations
         .apiGet("/v1/accounts/username_hash/" + Base64.getUrlEncoder().encodeToString(reservedHash))
         .executeExpectSuccess(AccountIdentifierResponse.class);
-    assertEquals(user.aciUuid(), accountIdentifierResponse.uuid());
+    assertEquals(new AciServiceIdentifier(user.aciUuid()), accountIdentifierResponse.uuid());
     // try authorized
     Operations
         .apiGet("/v1/accounts/username_hash/" + Base64.getUrlEncoder().encodeToString(reservedHash))

@@ -13,13 +13,15 @@ import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Predicate;
 import javax.annotation.Nullable;
+import org.apache.commons.lang3.StringUtils;
 import org.signal.libsignal.protocol.IdentityKey;
+import org.signal.libsignal.zkgroup.backups.BackupCredentialType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
@@ -27,10 +29,8 @@ import org.whispersystems.textsecuregcm.auth.StoredRegistrationLock;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.identity.IdentityType;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
 import org.whispersystems.textsecuregcm.util.ByteArrayBase64UrlAdapter;
 import org.whispersystems.textsecuregcm.util.IdentityKeyAdapter;
-import org.whispersystems.textsecuregcm.util.Util;
 
 @JsonFilter("Account")
 public class Account {
@@ -100,11 +100,43 @@ public class Account {
   @JsonProperty("inCds")
   private boolean discoverableByPhoneNumber = true;
 
+  /**
+   * A share-set the account holder has stored.
+   *
+   * A share-set is generated when a client stores a value in SVR3, and should be stored here with the account.  When
+   * they later want to recover the value, they need their share-set and their secret pin. The share-set is not a secret
+   * and, without the correct pin, is useless information.
+   *
+   * SVR3 share-sets are currently 167 bytes.
+   */
+  @JsonProperty("svr3ss")
+  @Nullable
+  private byte[] svr3ShareSet;
+
+  @JsonProperty("bcr")
+  @Nullable
+  private byte[] messagesBackupCredentialRequest;
+
+  @JsonProperty("mbcr")
+  @Nullable
+  private byte[] mediaBackupCredentialRequest;
+
+  @JsonProperty("bv")
+  @Nullable
+  private BackupVoucher backupVoucher;
+
   @JsonProperty
   private int version;
 
+  @JsonProperty("holds")
+  private List<UsernameHold> usernameHolds = Collections.emptyList();
+
   @JsonIgnore
   private boolean stale;
+
+  public record UsernameHold(@JsonProperty("uh") byte[] usernameHash, @JsonProperty("e") long expirationSecs) {}
+
+  public record BackupVoucher(@JsonProperty("rl") long receiptLevel, @JsonProperty("e") Instant expiration) {}
 
   public UUID getIdentifier(final IdentityType identityType) {
     return switch (identityType) {
@@ -220,7 +252,7 @@ public class Account {
     this.devices.add(device);
   }
 
-  public void removeDevice(final long deviceId) {
+  public void removeDevice(final byte deviceId) {
     requireNotStale();
 
     this.devices.removeIf(device -> device.getId() == deviceId);
@@ -232,74 +264,43 @@ public class Account {
     return devices;
   }
 
-  public Optional<Device> getMasterDevice() {
+  public Device getPrimaryDevice() {
     requireNotStale();
 
-    return getDevice(Device.MASTER_ID);
+    return getDevice(Device.PRIMARY_ID)
+        .orElseThrow(() -> new IllegalStateException("All accounts must have a primary device"));
   }
 
-  public Optional<Device> getDevice(final long deviceId) {
+  public Optional<Device> getDevice(final byte deviceId) {
     requireNotStale();
 
     return devices.stream().filter(device -> device.getId() == deviceId).findFirst();
   }
 
-  public boolean isStorageSupported() {
+  public boolean hasCapability(final DeviceCapability capability) {
     requireNotStale();
 
-    return devices.stream().anyMatch(device -> device.getCapabilities() != null && device.getCapabilities().storage());
+    return switch (capability.getAccountCapabilityMode()) {
+      case PRIMARY_DEVICE -> getPrimaryDevice().hasCapability(capability);
+      case ANY_DEVICE -> devices.stream().anyMatch(device -> device.hasCapability(capability));
+      case ALL_DEVICES -> devices.stream().allMatch(device -> device.hasCapability(capability));
+    };
   }
 
-  public boolean isTransferSupported() {
+  public byte getNextDeviceId() {
     requireNotStale();
 
-    return getMasterDevice().map(Device::getCapabilities).map(Device.DeviceCapabilities::transfer).orElse(false);
-  }
-
-  public boolean isPniSupported() {
-    return allEnabledDevicesHaveCapability(DeviceCapabilities::pni);
-  }
-
-  public boolean isPaymentActivationSupported() {
-    return allEnabledDevicesHaveCapability(DeviceCapabilities::paymentActivation);
-  }
-
-  private boolean allEnabledDevicesHaveCapability(final Predicate<DeviceCapabilities> predicate) {
-    requireNotStale();
-
-    return devices.stream()
-        .filter(Device::isEnabled)
-        .allMatch(device -> device.getCapabilities() != null && predicate.test(device.getCapabilities()));
-  }
-
-  public boolean isEnabled() {
-    requireNotStale();
-
-    return getMasterDevice().map(Device::isEnabled).orElse(false);
-  }
-
-  public long getNextDeviceId() {
-    requireNotStale();
-
-    long candidateId = Device.MASTER_ID + 1;
+    byte candidateId = Device.PRIMARY_ID + 1;
 
     while (getDevice(candidateId).isPresent()) {
       candidateId++;
     }
 
-    return candidateId;
-  }
-
-  public int getEnabledDeviceCount() {
-    requireNotStale();
-
-    int count = 0;
-
-    for (final Device device : devices) {
-      if (device.isEnabled()) count++;
+    if (candidateId <= Device.PRIMARY_ID) {
+      throw new RuntimeException("device ID overflow");
     }
 
-    return count;
+    return candidateId;
   }
 
   public void setIdentityKey(final IdentityKey identityKey) {
@@ -315,24 +316,6 @@ public class Account {
       case ACI -> identityKey;
       case PNI -> phoneNumberIdentityKey;
     };
-  }
-
-  /**
-   * @deprecated Please use {@link #getIdentityKey(IdentityType)} instead.
-   */
-  @Deprecated
-  public IdentityKey getIdentityKey() {
-    requireNotStale();
-
-    return identityKey;
-  }
-
-  /**
-   * @deprecated Please use {@link #getIdentityKey(IdentityType)} instead.
-   */
-  @Deprecated
-  public IdentityKey getPhoneNumberIdentityKey() {
-    return phoneNumberIdentityKey;
   }
 
   public void setPhoneNumberIdentityKey(final IdentityKey phoneNumberIdentityKey) {
@@ -378,7 +361,7 @@ public class Account {
     boolean added = false;
     for (int i = 0; i < badges.size(); i++) {
       final AccountBadge badgeInList = badges.get(i);
-      if (Objects.equals(badgeInList.getId(), badge.getId())) {
+      if (Objects.equals(badgeInList.id(), badge.id())) {
         if (added) {
           badges.remove(i);
           i--;
@@ -400,14 +383,14 @@ public class Account {
     requireNotStale();
 
     // early exit if it's already the first item in the list
-    if (!badges.isEmpty() && Objects.equals(badges.get(0).getId(), badgeId)) {
+    if (!badges.isEmpty() && Objects.equals(badges.get(0).id(), badgeId)) {
       purgeStaleBadges(clock);
       return;
     }
 
     int indexOfBadge = -1;
     for (int i = 1; i < badges.size(); i++) {
-      if (Objects.equals(badgeId, badges.get(i).getId())) {
+      if (Objects.equals(badgeId, badges.get(i).id())) {
         indexOfBadge = i;
         break;
       }
@@ -423,17 +406,17 @@ public class Account {
   public void removeBadge(final Clock clock, final String id) {
     requireNotStale();
 
-    badges.removeIf(accountBadge -> Objects.equals(accountBadge.getId(), id));
+    badges.removeIf(accountBadge -> Objects.equals(accountBadge.id(), id));
     purgeStaleBadges(clock);
   }
 
   private void purgeStaleBadges(final Clock clock) {
     final Instant now = clock.instant();
-    badges.removeIf(accountBadge -> now.isAfter(accountBadge.getExpiration()));
+    badges.removeIf(accountBadge -> now.isAfter(accountBadge.expiration()));
   }
 
   public void setRegistrationLockFromAttributes(final AccountAttributes attributes) {
-    if (!Util.isEmpty(attributes.getRegistrationLock())) {
+    if (StringUtils.isNotEmpty(attributes.getRegistrationLock())) {
       final SaltedTokenHash credentials = SaltedTokenHash.generateFor(attributes.getRegistrationLock());
       setRegistrationLock(credentials.hash(), credentials.salt());
     } else {
@@ -490,12 +473,6 @@ public class Account {
     this.discoverableByPhoneNumber = discoverableByPhoneNumber;
   }
 
-  public boolean shouldBeVisibleInDirectory() {
-    requireNotStale();
-
-    return isEnabled() && isDiscoverableByPhoneNumber();
-  }
-
   public int getVersion() {
     requireNotStale();
 
@@ -508,6 +485,43 @@ public class Account {
     this.version = version;
   }
 
+  public @Nullable byte[] getSvr3ShareSet() {
+    return svr3ShareSet;
+  }
+
+  public void setSvr3ShareSet(final byte[] svr3ShareSet) {
+    this.svr3ShareSet = svr3ShareSet;
+  }
+
+  public void setBackupCredentialRequests(final byte[] messagesBackupCredentialRequest,
+      final byte[] mediaBackupCredentialRequest) {
+
+    requireNotStale();
+
+    this.messagesBackupCredentialRequest = messagesBackupCredentialRequest;
+    this.mediaBackupCredentialRequest = mediaBackupCredentialRequest;
+  }
+
+  public Optional<byte[]> getBackupCredentialRequest(final BackupCredentialType credentialType) {
+    requireNotStale();
+
+    return Optional.ofNullable(switch (credentialType) {
+      case MESSAGES -> messagesBackupCredentialRequest;
+      case MEDIA -> mediaBackupCredentialRequest;
+    });
+  }
+
+  public @Nullable BackupVoucher getBackupVoucher() {
+    requireNotStale();
+
+    return backupVoucher;
+  }
+
+  public void setBackupVoucher(final @Nullable BackupVoucher backupVoucher) {
+    requireNotStale();
+
+    this.backupVoucher = backupVoucher;
+  }
 
   /**
    * Have all this account's devices been manually locked?
@@ -533,8 +547,13 @@ public class Account {
     devices.forEach(Device::lockAuthTokenHash);
   }
 
-  boolean isStale() {
-    return stale;
+  public List<UsernameHold> getUsernameHolds() {
+    return Collections.unmodifiableList(usernameHolds);
+  }
+
+  public void setUsernameHolds(final List<UsernameHold> usernameHolds) {
+    this.requireNotStale();
+    this.usernameHolds = usernameHolds;
   }
 
   public void markStale() {

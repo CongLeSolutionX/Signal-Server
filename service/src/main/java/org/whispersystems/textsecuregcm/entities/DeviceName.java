@@ -5,20 +5,15 @@
 
 package org.whispersystems.textsecuregcm.entities;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.Size;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Size;
 
-public class DeviceName {
-
-  @JsonProperty
-  @NotEmpty
-  @Size(max = 300, message = "This field must be less than 300 characters")
-  private String deviceName;
-
-  public DeviceName() {}
-
-  public String getDeviceName() {
-    return deviceName;
-  }
+public record DeviceName(@JsonSerialize(using = ByteArrayAdapter.Serializing.class)
+                         @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
+                         @NotEmpty
+                         @Size(max = 225)
+                         byte[] deviceName) {
 }

@@ -20,17 +20,21 @@ import static org.mockito.Mockito.when;
 
 import io.lettuce.core.cluster.api.sync.RedisAdvancedClusterCommands;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,31 +43,37 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.ecc.Curve;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
+import org.whispersystems.textsecuregcm.auth.DisconnectionRequestManager;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
-import org.whispersystems.textsecuregcm.experiment.ExperimentEnrollmentManager;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
-import org.whispersystems.textsecuregcm.securebackup.SecureBackupClient;
+import org.whispersystems.textsecuregcm.identity.IdentityType;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClient;
 import org.whispersystems.textsecuregcm.securestorage.SecureStorageClient;
 import org.whispersystems.textsecuregcm.securevaluerecovery.SecureValueRecovery2Client;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
 import org.whispersystems.textsecuregcm.tests.util.DevicesHelper;
 import org.whispersystems.textsecuregcm.tests.util.JsonHelpers;
+import org.whispersystems.textsecuregcm.tests.util.KeysHelper;
 import org.whispersystems.textsecuregcm.tests.util.RedisClusterHelper;
 import org.whispersystems.textsecuregcm.util.Pair;
 
 
 class AccountsManagerConcurrentModificationIntegrationTest {
 
-  private static final int SCAN_PAGE_SIZE = 1;
-
   @RegisterExtension
   static final DynamoDbExtension DYNAMO_DB_EXTENSION = new DynamoDbExtension(
       Tables.ACCOUNTS,
       Tables.NUMBERS,
-      Tables.PNI_ASSIGNMENTS
-  );
+      Tables.PNI_ASSIGNMENTS,
+      Tables.DELETED_ACCOUNTS,
+      Tables.EC_KEYS,
+      Tables.PQ_KEYS,
+      Tables.REPEATED_USE_EC_SIGNED_PRE_KEYS,
+      Tables.REPEATED_USE_KEM_SIGNED_PRE_KEYS);
 
   private Accounts accounts;
 
@@ -87,7 +97,8 @@ class AccountsManagerConcurrentModificationIntegrationTest {
         Tables.NUMBERS.tableName(),
         Tables.PNI_ASSIGNMENTS.tableName(),
         Tables.USERNAMES.tableName(),
-        SCAN_PAGE_SIZE);
+        Tables.DELETED_ACCOUNTS.tableName(),
+        Tables.USED_LINK_DEVICE_TOKENS.tableName());
 
     {
       //noinspection unchecked
@@ -100,10 +111,14 @@ class AccountsManagerConcurrentModificationIntegrationTest {
         task.run();
 
         return null;
-      }).when(accountLockManager).withLock(any(), any());
+      }).when(accountLockManager).withLock(any(), any(), any());
 
-      final DeletedAccounts deletedAccounts = mock(DeletedAccounts.class);
-      when(deletedAccounts.findUuid(any())).thenReturn(Optional.empty());
+      when(accountLockManager.withLockAsync(any(), any(), any())).thenAnswer(invocation -> {
+        final Supplier<CompletableFuture<?>> taskSupplier = invocation.getArgument(1);
+        taskSupplier.get().join();
+
+        return CompletableFuture.completedFuture(null);
+      });
 
       final PhoneNumberIdentifiers phoneNumberIdentifiers = mock(PhoneNumberIdentifiers.class);
       when(phoneNumberIdentifiers.getPhoneNumberIdentifier(anyString()))
@@ -113,33 +128,57 @@ class AccountsManagerConcurrentModificationIntegrationTest {
           accounts,
           phoneNumberIdentifiers,
           RedisClusterHelper.builder().stringCommands(commands).build(),
+          mock(FaultTolerantRedisClient.class),
           accountLockManager,
-          deletedAccounts,
           mock(KeysManager.class),
           mock(MessagesManager.class),
           mock(ProfilesManager.class),
           mock(SecureStorageClient.class),
-          mock(SecureBackupClient.class),
           mock(SecureValueRecovery2Client.class),
-          mock(ClientPresenceManager.class),
-          mock(ExperimentEnrollmentManager.class),
+          mock(DisconnectionRequestManager.class),
           mock(RegistrationRecoveryPasswordsManager.class),
-          mock(Clock.class)
+          mock(ClientPublicKeysManager.class),
+          mock(Executor.class),
+          mock(ScheduledExecutorService.class),
+          mock(Clock.class),
+          "link-device-secret".getBytes(StandardCharsets.UTF_8),
+          dynamicConfigurationManager
       );
     }
   }
 
   @Test
   void testConcurrentUpdate() throws IOException, InterruptedException {
-
     final UUID uuid;
     {
+      final ECKeyPair aciKeyPair = Curve.generateKeyPair();
+      final ECKeyPair pniKeyPair = Curve.generateKeyPair();
+
       final Account account = accountsManager.update(
-          accountsManager.create("+14155551212", "password", null, new AccountAttributes(), new ArrayList<>()),
+          accountsManager.create("+14155551212",
+              new AccountAttributes(),
+              new ArrayList<>(),
+              new IdentityKey(aciKeyPair.getPublicKey()),
+              new IdentityKey(pniKeyPair.getPublicKey()),
+              new DeviceSpec(
+                  null,
+                  "password",
+                  null,
+                  Set.of(),
+                  1,
+                  2,
+                  true,
+                  Optional.empty(),
+                  Optional.empty(),
+                  KeysHelper.signedECPreKey(1, aciKeyPair),
+                  KeysHelper.signedECPreKey(2, pniKeyPair),
+                  KeysHelper.signedKEMPreKey(3, aciKeyPair),
+                  KeysHelper.signedKEMPreKey(4, pniKeyPair)),
+              null),
           a -> {
-            a.setUnidentifiedAccessKey(new byte[16]);
-            a.removeDevice(1);
-            a.addDevice(DevicesHelper.createDevice(1));
+            a.setUnidentifiedAccessKey(new byte[UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH]);
+            a.removeDevice(Device.PRIMARY_ID);
+            a.addDevice(DevicesHelper.createDevice(Device.PRIMARY_ID));
           });
 
       uuid = account.getUuid();
@@ -162,8 +201,8 @@ class AccountsManagerConcurrentModificationIntegrationTest {
         modifyAccount(uuid, account -> account.setUnidentifiedAccessKey(unidentifiedAccessKey)),
         modifyAccount(uuid, account -> account.setRegistrationLock(credentials.hash(), credentials.salt())),
         modifyAccount(uuid, account -> account.setUnrestrictedUnidentifiedAccess(unrestrictedUnidentifiedAccess)),
-        modifyDevice(uuid, Device.MASTER_ID, device -> device.setLastSeen(lastSeen)),
-        modifyDevice(uuid, Device.MASTER_ID, device -> device.setName("deviceName"))
+        modifyDevice(uuid, Device.PRIMARY_ID, device -> device.setLastSeen(lastSeen)),
+        modifyDevice(uuid, Device.PRIMARY_ID, device -> device.setName("deviceName".getBytes(StandardCharsets.UTF_8)))
     ).join();
 
     final Account managerAccount = accountsManager.getByAccountIdentifier(uuid).orElseThrow();
@@ -194,7 +233,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
     assertAll(name,
         () -> assertEquals(discoverableByPhoneNumber, account.isDiscoverableByPhoneNumber()),
         () -> assertEquals(currentProfileVersion, account.getCurrentProfileVersion().orElseThrow()),
-        () -> assertEquals(identityKey, account.getIdentityKey()),
+        () -> assertEquals(identityKey, account.getIdentityKey(IdentityType.ACI)),
         () -> assertArrayEquals(unidentifiedAccessKey, account.getUnidentifiedAccessKey().orElseThrow()),
         () -> assertTrue(account.getRegistrationLock().verify(clientRegistrationLock)),
         () -> assertEquals(unrestrictedUnidentifiedAccess, account.isUnrestrictedUnidentifiedAccess())
@@ -209,7 +248,7 @@ class AccountsManagerConcurrentModificationIntegrationTest {
     }, mutationExecutor);
   }
 
-  private CompletableFuture<?> modifyDevice(final UUID uuid, final long deviceId, final Consumer<Device> deviceMutation) {
+  private CompletableFuture<?> modifyDevice(final UUID uuid, final byte deviceId, final Consumer<Device> deviceMutation) {
 
     return CompletableFuture.runAsync(() -> {
       final Account account = accountsManager.getByAccountIdentifier(uuid).orElseThrow();

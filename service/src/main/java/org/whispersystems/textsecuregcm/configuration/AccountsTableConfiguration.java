@@ -2,15 +2,15 @@ package org.whispersystems.textsecuregcm.configuration;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotBlank;
 import org.whispersystems.textsecuregcm.configuration.DynamoDbTables.Table;
-import javax.validation.constraints.NotBlank;
 
 public class AccountsTableConfiguration extends Table {
 
   private final String phoneNumberTableName;
   private final String phoneNumberIdentifierTableName;
   private final String usernamesTableName;
-  private final int scanPageSize;
+  private final String usedLinkDeviceTokensTableName;
 
   @JsonCreator
   public AccountsTableConfiguration(
@@ -18,14 +18,14 @@ public class AccountsTableConfiguration extends Table {
       @JsonProperty("phoneNumberTableName") final String phoneNumberTableName,
       @JsonProperty("phoneNumberIdentifierTableName") final String phoneNumberIdentifierTableName,
       @JsonProperty("usernamesTableName") final String usernamesTableName,
-      @JsonProperty("scanPageSize") final int scanPageSize) {
+      @JsonProperty("usedLinkDeviceTokensTableName") final String usedLinkDeviceTokensTableName) {
 
     super(tableName);
 
     this.phoneNumberTableName = phoneNumberTableName;
     this.phoneNumberIdentifierTableName = phoneNumberIdentifierTableName;
     this.usernamesTableName = usernamesTableName;
-    this.scanPageSize = scanPageSize;
+    this.usedLinkDeviceTokensTableName = usedLinkDeviceTokensTableName;
   }
 
   @NotBlank
@@ -43,7 +43,8 @@ public class AccountsTableConfiguration extends Table {
     return usernamesTableName;
   }
 
-  public int getScanPageSize() {
-    return scanPageSize;
+  @NotBlank
+  public String getUsedLinkDeviceTokensTableName() {
+    return usedLinkDeviceTokensTableName;
   }
 }

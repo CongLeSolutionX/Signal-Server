@@ -8,27 +8,41 @@ import com.google.i18n.phonenumbers.NumberParseException;
 import com.google.i18n.phonenumbers.PhoneNumberUtil;
 import com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat;
 import com.google.i18n.phonenumbers.Phonenumber.PhoneNumber;
+import jakarta.ws.rs.core.Response;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Locale.LanguageRange;
 import java.util.Optional;
+import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.random.RandomGenerator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.annotation.Nonnull;
 import org.apache.commons.lang3.StringUtils;
 
 public class Util {
+
+  private static final RandomGenerator rng = new Random();
 
   private static final Pattern COUNTRY_CODE_PATTERN = Pattern.compile("^\\+([17]|2[07]|3[0123469]|4[013456789]|5[12345678]|6[0123456]|8[1246]|9[0123458]|\\d{3})");
 
   private static final PhoneNumberUtil PHONE_NUMBER_UTIL = PhoneNumberUtil.getInstance();
 
   public static final Runnable NOOP = () -> {};
+
+  // Use `CompletableFuture#thenApply(ASYNC_EMPTY_RESPONSE) to convert futures to
+  // CompletableFuture<Response> instead of using NOOP to convert them to CompletableFuture<Void>
+  // for jersey controllers; https://github.com/eclipse-ee4j/jersey/issues/3901 causes controllers
+  // returning Void futures to behave differently than synchronous controllers returning void
+  public static final Function<Object, Response> ASYNC_EMPTY_RESPONSE = ignored -> Response.noContent().build();
 
   /**
    * Checks that the given number is a valid, E164-normalized phone number.
@@ -98,14 +112,6 @@ public class Util {
     return number.substring(0, 1 + countryCode.length() + prefixLength);
   }
 
-  public static boolean isEmpty(String param) {
-    return param == null || param.length() == 0;
-  }
-
-  public static boolean nonEmpty(String param) {
-    return !isEmpty(param);
-  }
-
   public static byte[] truncate(byte[] element, int length) {
     byte[] result = new byte[length];
     System.arraycopy(element, 0, result, 0, result.length);
@@ -113,67 +119,10 @@ public class Util {
     return result;
   }
 
-  public static byte[][] split(byte[] input, int firstLength, int secondLength) {
-    byte[][] parts = new byte[2][];
-
-    parts[0] = new byte[firstLength];
-    System.arraycopy(input, 0, parts[0], 0, firstLength);
-
-    parts[1] = new byte[secondLength];
-    System.arraycopy(input, firstLength, parts[1], 0, secondLength);
-
-    return parts;
-  }
-
-  public static byte[][] split(byte[] input, int firstLength, int secondLength, int thirdLength, int fourthLength) {
-    byte[][] parts = new byte[4][];
-
-    parts[0] = new byte[firstLength];
-    System.arraycopy(input, 0, parts[0], 0, firstLength);
-
-    parts[1] = new byte[secondLength];
-    System.arraycopy(input, firstLength, parts[1], 0, secondLength);
-
-    parts[2] = new byte[thirdLength];
-    System.arraycopy(input, firstLength + secondLength, parts[2], 0, thirdLength);
-
-    parts[3] = new byte[fourthLength];
-    System.arraycopy(input, firstLength + secondLength + thirdLength, parts[3], 0, fourthLength);
-
-    return parts;
-  }
-
-  public static final long DAY_IN_MILLIS = 86400000L;
-  public static final long WEEK_IN_MILLIS = DAY_IN_MILLIS * 7;
-
-  public static int currentDaysSinceEpoch(@Nonnull Clock clock) {
-    return Math.toIntExact(clock.millis() / DAY_IN_MILLIS);
-  }
-
   public static void sleep(long i) {
     try {
       Thread.sleep(i);
     } catch (InterruptedException ie) {}
-  }
-
-  public static void wait(Object object) {
-    try {
-      object.wait();
-    } catch (InterruptedException e) {
-      throw new AssertionError(e);
-    }
-  }
-
-  public static void wait(Object object, long timeoutMs) {
-    try {
-      object.wait(timeoutMs);
-    } catch (InterruptedException e) {
-      throw new AssertionError(e);
-    }
-  }
-
-  public static int hashCode(Object... objects) {
-    return Arrays.hashCode(objects);
   }
 
   public static long todayInMillis() {
@@ -217,4 +166,44 @@ public class Util {
     return n == Long.MIN_VALUE ? 0 : Math.abs(n);
   }
 
+  /**
+   * Chooses min(values.size(), n) random values in shuffled order.
+   * <br>
+   * Copies the input Array - use for small lists only or for when n/values.size() is near 1.
+   */
+  public static <E> List<E> randomNOfShuffled(List<E> values, int n) {
+    if(values == null || values.isEmpty()) {
+      return Collections.emptyList();
+    }
+
+    List<E> result = new ArrayList<>(values);
+    Collections.shuffle(result);
+
+    return result.stream().limit(n).toList();
+  }
+
+  /**
+   * Chooses min(values.size(), n) random values. Return value is in stable order from input values.
+   * Not uniform random, but good enough.
+   * <br>
+   * Does NOT copy the input Array.
+   */
+  public static <E> List<E> randomNOfStable(List<E> values, int n) {
+    if(values == null || values.isEmpty()) {
+      return Collections.emptyList();
+    }
+    if(n >= values.size()) {
+      return values;
+    }
+
+    Set<Integer> indices = new HashSet<>(rng.ints(0, values.size()).distinct().limit(n).boxed().toList());
+    List<E> result = new ArrayList<E>(n);
+    for(int i = 0; i < values.size() && result.size() < n; i++) {
+      if(indices.contains(i)) {
+        result.add(values.get(i));
+      }
+    }
+
+    return result;
+  }
 }

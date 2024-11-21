@@ -5,11 +5,12 @@
 
 package org.whispersystems.textsecuregcm.configuration;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Positive;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Map;
-import javax.validation.Valid;
-import javax.validation.constraints.NotEmpty;
-import javax.validation.constraints.Positive;
 
 /**
  * @param boost      configuration for individual donations
@@ -18,7 +19,8 @@ import javax.validation.constraints.Positive;
  */
 public record OneTimeDonationConfiguration(@Valid ExpiringLevelConfiguration boost,
                                            @Valid ExpiringLevelConfiguration gift,
-                                           Map<String, @Valid OneTimeDonationCurrencyConfiguration> currencies) {
+                                           Map<String, @Valid OneTimeDonationCurrencyConfiguration> currencies,
+                                           BigDecimal sepaMaximumEuros) {
 
   /**
    * @param badge      the numeric donation level ID

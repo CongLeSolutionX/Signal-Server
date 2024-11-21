@@ -26,7 +26,6 @@ import org.whispersystems.textsecuregcm.entities.KEMSignedPreKey;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
 import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.push.MessageSender;
-import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
 import org.whispersystems.textsecuregcm.util.DestinationDeviceValidator;
 
 public class ChangeNumberManager {
@@ -43,10 +42,10 @@ public class ChangeNumberManager {
 
   public Account changeNumber(final Account account, final String number,
       @Nullable final IdentityKey pniIdentityKey,
-      @Nullable final Map<Long, ECSignedPreKey> deviceSignedPreKeys,
-      @Nullable final Map<Long, KEMSignedPreKey> devicePqLastResortPreKeys,
+      @Nullable final Map<Byte, ECSignedPreKey> deviceSignedPreKeys,
+      @Nullable final Map<Byte, KEMSignedPreKey> devicePqLastResortPreKeys,
       @Nullable final List<IncomingMessage> deviceMessages,
-      @Nullable final Map<Long, Integer> pniRegistrationIds)
+      @Nullable final Map<Byte, Integer> pniRegistrationIds)
       throws InterruptedException, MismatchedDevicesException, StaleDevicesException {
 
     if (ObjectUtils.allNotNull(pniIdentityKey, deviceSignedPreKeys, deviceMessages, pniRegistrationIds)) {
@@ -55,7 +54,6 @@ public class ChangeNumberManager {
     } else if (!ObjectUtils.allNull(pniIdentityKey, deviceSignedPreKeys, deviceMessages, pniRegistrationIds)) {
       throw new IllegalArgumentException("PNI identity key, signed pre-keys, device messages, and registration IDs must be all null or all non-null");
     }
-
 
     if (number.equals(account.getNumber())) {
       // The client has gotten confused/desynchronized with us about their own phone number, most likely due to losing
@@ -83,10 +81,10 @@ public class ChangeNumberManager {
 
   public Account updatePniKeys(final Account account,
       final IdentityKey pniIdentityKey,
-      final Map<Long, ECSignedPreKey> deviceSignedPreKeys,
-      @Nullable final Map<Long, KEMSignedPreKey> devicePqLastResortPreKeys,
+      final Map<Byte, ECSignedPreKey> deviceSignedPreKeys,
+      @Nullable final Map<Byte, KEMSignedPreKey> devicePqLastResortPreKeys,
       final List<IncomingMessage> deviceMessages,
-      final Map<Long, Integer> pniRegistrationIds) throws MismatchedDevicesException, StaleDevicesException {
+      final Map<Byte, Integer> pniRegistrationIds) throws MismatchedDevicesException, StaleDevicesException {
     validateDeviceMessages(account, deviceMessages);
 
     // Don't try to be smart about ignoring unnecessary retries. If we make literally no change we will skip the ddb
@@ -100,11 +98,11 @@ public class ChangeNumberManager {
 
   private void validateDeviceMessages(final Account account,
       final List<IncomingMessage> deviceMessages) throws MismatchedDevicesException, StaleDevicesException {
-    // Check that all except master ID are in device messages
+    // Check that all except primary ID are in device messages
     DestinationDeviceValidator.validateCompleteDeviceList(
         account,
         deviceMessages.stream().map(IncomingMessage::destinationDeviceId).collect(Collectors.toSet()),
-        Set.of(Device.MASTER_ID));
+        Set.of(Device.PRIMARY_ID));
 
     // check that all sync messages are to the current registration ID for the matching device
     DestinationDeviceValidator.validateRegistrationIds(
@@ -116,8 +114,13 @@ public class ChangeNumberManager {
   }
 
   private void sendDeviceMessages(final Account account, final List<IncomingMessage> deviceMessages) {
-    deviceMessages.forEach(message ->
-        sendMessageToSelf(account, account.getDevice(message.destinationDeviceId()), message));
+    try {
+      deviceMessages.forEach(message ->
+          sendMessageToSelf(account, account.getDevice(message.destinationDeviceId()), message));
+    } catch (RuntimeException e) {
+      logger.warn("Changed number but could not send all device messages on {}", account.getUuid(), e);
+      throw e;
+    }
   }
 
   @VisibleForTesting
@@ -131,23 +134,21 @@ public class ChangeNumberManager {
       logger.debug("destination device not present");
       return;
     }
-    try {
-      long serverTimestamp = System.currentTimeMillis();
-      Envelope envelope = Envelope.newBuilder()
-          .setType(Envelope.Type.forNumber(message.type()))
-          .setTimestamp(serverTimestamp)
-          .setServerTimestamp(serverTimestamp)
-          .setDestinationUuid(new AciServiceIdentifier(sourceAndDestinationAccount.getUuid()).toServiceIdentifierString())
-          .setContent(ByteString.copyFrom(contents.get()))
-          .setSourceUuid(new AciServiceIdentifier(sourceAndDestinationAccount.getUuid()).toServiceIdentifierString())
-          .setSourceDevice((int) Device.MASTER_ID)
-          .setUpdatedPni(sourceAndDestinationAccount.getPhoneNumberIdentifier().toString())
-          .setUrgent(true)
-          .build();
 
-      messageSender.sendMessage(sourceAndDestinationAccount, destinationDevice.get(), envelope, false);
-    } catch (NotPushRegisteredException e) {
-      logger.debug("Not registered", e);
-    }
+    final long serverTimestamp = System.currentTimeMillis();
+    final Envelope envelope = Envelope.newBuilder()
+        .setType(Envelope.Type.forNumber(message.type()))
+        .setClientTimestamp(serverTimestamp)
+        .setServerTimestamp(serverTimestamp)
+        .setDestinationServiceId(
+            new AciServiceIdentifier(sourceAndDestinationAccount.getUuid()).toServiceIdentifierString())
+        .setContent(ByteString.copyFrom(contents.get()))
+        .setSourceServiceId(new AciServiceIdentifier(sourceAndDestinationAccount.getUuid()).toServiceIdentifierString())
+        .setSourceDevice(Device.PRIMARY_ID)
+        .setUpdatedPni(sourceAndDestinationAccount.getPhoneNumberIdentifier().toString())
+        .setUrgent(true)
+        .build();
+
+    messageSender.sendMessage(sourceAndDestinationAccount, destinationDevice.get(), envelope, false);
   }
 }

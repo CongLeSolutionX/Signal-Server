@@ -5,249 +5,128 @@
 
 package org.whispersystems.textsecuregcm.websocket;
 
-import static com.codahale.metrics.MetricRegistry.name;
+import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
-import com.codahale.metrics.Counter;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.SharedMetricRegistries;
-import com.codahale.metrics.Timer;
-import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tags;
-import java.util.EnumMap;
-import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
-import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
-import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
-import org.whispersystems.textsecuregcm.push.ClientPresenceManager;
-import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.limits.MessageDeliveryLoopMonitor;
+import org.whispersystems.textsecuregcm.metrics.MessageMetrics;
+import org.whispersystems.textsecuregcm.metrics.OpenWebSocketCounter;
+import org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager;
 import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
-import org.whispersystems.textsecuregcm.redis.RedisOperation;
 import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
-import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.storage.MessagesManager;
-import org.whispersystems.textsecuregcm.util.Constants;
-import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
-import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
-import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
 import org.whispersystems.websocket.session.WebSocketSessionContext;
 import org.whispersystems.websocket.setup.WebSocketConnectListener;
 import reactor.core.scheduler.Scheduler;
 
 public class AuthenticatedConnectListener implements WebSocketConnectListener {
 
-  private static final MetricRegistry metricRegistry = SharedMetricRegistries.getOrCreate(Constants.METRICS_NAME);
-  private static final Timer durationTimer = metricRegistry.timer(
-      name(WebSocketConnection.class, "connected_duration"));
-  private static final Timer unauthenticatedDurationTimer = metricRegistry.timer(
-      name(WebSocketConnection.class, "unauthenticated_connection_duration"));
-  private static final Counter openWebsocketCounter = metricRegistry.counter(
-      name(WebSocketConnection.class, "open_websockets"));
-
-  private static final String OPEN_WEBSOCKET_COUNTER_NAME =
-      MetricsUtil.name(WebSocketConnection.class, "openWebsockets");
-  private static final String CONNECTED_DURATION_TIMER_NAME = MetricsUtil.name(AuthenticatedConnectListener.class,
-      "connectedDuration");
+  private static final String OPEN_WEBSOCKET_GAUGE_NAME = name(WebSocketConnection.class, "openWebsockets");
+  private static final String CONNECTED_DURATION_TIMER_NAME =
+      name(AuthenticatedConnectListener.class, "connectedDuration");
 
   private static final String AUTHENTICATED_TAG_NAME = "authenticated";
-
-  private static final long RENEW_PRESENCE_INTERVAL_MINUTES = 5;
 
   private static final Logger log = LoggerFactory.getLogger(AuthenticatedConnectListener.class);
 
   private final ReceiptSender receiptSender;
   private final MessagesManager messagesManager;
+  private final MessageMetrics messageMetrics;
   private final PushNotificationManager pushNotificationManager;
-  private final ClientPresenceManager clientPresenceManager;
+  private final PushNotificationScheduler pushNotificationScheduler;
+  private final WebSocketConnectionEventManager webSocketConnectionEventManager;
   private final ScheduledExecutorService scheduledExecutorService;
   private final Scheduler messageDeliveryScheduler;
   private final ClientReleaseManager clientReleaseManager;
+  private final MessageDeliveryLoopMonitor messageDeliveryLoopMonitor;
 
-  private final Map<ClientPlatform, AtomicInteger> openAuthenticatedWebsocketsByClientPlatform;
-  private final Map<ClientPlatform, AtomicInteger> openUnauthenticatedWebsocketsByClientPlatform;
-  private final Map<ClientPlatform, io.micrometer.core.instrument.Timer> durationTimersByClientPlatform;
-  private final Map<ClientPlatform, io.micrometer.core.instrument.Timer> unauthenticatedDurationTimersByClientPlatform;
-
-  private final AtomicInteger openAuthenticatedWebsocketsFromUnknownPlatforms;
-  private final AtomicInteger openUnauthenticatedWebsocketsFromUnknownPlatforms;
-  private final io.micrometer.core.instrument.Timer durationTimerForUnknownPlatforms;
-  private final io.micrometer.core.instrument.Timer unauthenticatedDurationTimerForUnknownPlatforms;
+  private final OpenWebSocketCounter openAuthenticatedWebSocketCounter;
+  private final OpenWebSocketCounter openUnauthenticatedWebSocketCounter;
 
   public AuthenticatedConnectListener(ReceiptSender receiptSender,
       MessagesManager messagesManager,
+      MessageMetrics messageMetrics,
       PushNotificationManager pushNotificationManager,
-      ClientPresenceManager clientPresenceManager,
+      PushNotificationScheduler pushNotificationScheduler,
+      WebSocketConnectionEventManager webSocketConnectionEventManager,
       ScheduledExecutorService scheduledExecutorService,
       Scheduler messageDeliveryScheduler,
-      ClientReleaseManager clientReleaseManager) {
+      ClientReleaseManager clientReleaseManager,
+      MessageDeliveryLoopMonitor messageDeliveryLoopMonitor) {
     this.receiptSender = receiptSender;
     this.messagesManager = messagesManager;
+    this.messageMetrics = messageMetrics;
     this.pushNotificationManager = pushNotificationManager;
-    this.clientPresenceManager = clientPresenceManager;
+    this.pushNotificationScheduler = pushNotificationScheduler;
+    this.webSocketConnectionEventManager = webSocketConnectionEventManager;
     this.scheduledExecutorService = scheduledExecutorService;
     this.messageDeliveryScheduler = messageDeliveryScheduler;
     this.clientReleaseManager = clientReleaseManager;
+    this.messageDeliveryLoopMonitor = messageDeliveryLoopMonitor;
 
-    openAuthenticatedWebsocketsByClientPlatform = new EnumMap<>(ClientPlatform.class);
-    openUnauthenticatedWebsocketsByClientPlatform = new EnumMap<>(ClientPlatform.class);
-    durationTimersByClientPlatform = new EnumMap<>(ClientPlatform.class);
-    unauthenticatedDurationTimersByClientPlatform = new EnumMap<>(ClientPlatform.class);
+    openAuthenticatedWebSocketCounter =
+        new OpenWebSocketCounter(OPEN_WEBSOCKET_GAUGE_NAME, CONNECTED_DURATION_TIMER_NAME, Tags.of(AUTHENTICATED_TAG_NAME, "true"));
 
-    final Tags authenticatedTag = Tags.of(AUTHENTICATED_TAG_NAME, "true");
-    final Tags unauthenticatedTag = Tags.of(AUTHENTICATED_TAG_NAME, "false");
-
-    for (final ClientPlatform clientPlatform : ClientPlatform.values()) {
-      openAuthenticatedWebsocketsByClientPlatform.put(clientPlatform, new AtomicInteger(0));
-      openUnauthenticatedWebsocketsByClientPlatform.put(clientPlatform, new AtomicInteger(0));
-
-      final Tags clientPlatformTag = Tags.of(UserAgentTagUtil.PLATFORM_TAG, clientPlatform.name().toLowerCase());
-      Metrics.gauge(OPEN_WEBSOCKET_COUNTER_NAME, clientPlatformTag.and(authenticatedTag),
-          openAuthenticatedWebsocketsByClientPlatform.get(clientPlatform));
-
-      Metrics.gauge(OPEN_WEBSOCKET_COUNTER_NAME, clientPlatformTag.and(unauthenticatedTag),
-          openUnauthenticatedWebsocketsByClientPlatform.get(clientPlatform));
-
-      durationTimersByClientPlatform.put(clientPlatform,
-          Metrics.timer(CONNECTED_DURATION_TIMER_NAME, clientPlatformTag.and(authenticatedTag)));
-
-      unauthenticatedDurationTimersByClientPlatform.put(clientPlatform,
-          Metrics.timer(CONNECTED_DURATION_TIMER_NAME, clientPlatformTag.and(unauthenticatedTag)));
-    }
-
-    openAuthenticatedWebsocketsFromUnknownPlatforms = new AtomicInteger(0);
-    openUnauthenticatedWebsocketsFromUnknownPlatforms = new AtomicInteger(0);
-
-    final Tags unrecognizedPlatform = Tags.of(UserAgentTagUtil.PLATFORM_TAG, "unrecognized");
-    Metrics.gauge(OPEN_WEBSOCKET_COUNTER_NAME, unrecognizedPlatform.and(authenticatedTag),
-        openAuthenticatedWebsocketsFromUnknownPlatforms);
-
-    Metrics.gauge(OPEN_WEBSOCKET_COUNTER_NAME, unrecognizedPlatform.and(unauthenticatedTag),
-        openUnauthenticatedWebsocketsFromUnknownPlatforms);
-
-    durationTimerForUnknownPlatforms = Metrics.timer(CONNECTED_DURATION_TIMER_NAME,
-        unrecognizedPlatform.and(authenticatedTag));
-
-    unauthenticatedDurationTimerForUnknownPlatforms = Metrics.timer(CONNECTED_DURATION_TIMER_NAME,
-        unrecognizedPlatform.and(unauthenticatedTag));
+    openUnauthenticatedWebSocketCounter =
+        new OpenWebSocketCounter(OPEN_WEBSOCKET_GAUGE_NAME, CONNECTED_DURATION_TIMER_NAME, Tags.of(AUTHENTICATED_TAG_NAME, "false"));
   }
 
   @Override
   public void onWebSocketConnect(WebSocketSessionContext context) {
 
     final boolean authenticated = (context.getAuthenticated() != null);
-    final String userAgent = context.getClient().getUserAgent();
-    final AtomicInteger openWebsocketAtomicInteger = getOpenWebsocketCounter(userAgent, authenticated);
-    final io.micrometer.core.instrument.Timer connectionTimer = getConnectionTimer(userAgent, authenticated);
+    final OpenWebSocketCounter openWebSocketCounter =
+        authenticated ? openAuthenticatedWebSocketCounter : openUnauthenticatedWebSocketCounter;
+
+    openWebSocketCounter.countOpenWebSocket(context);
 
     if (authenticated) {
-      final AuthenticatedAccount auth = context.getAuthenticated(AuthenticatedAccount.class);
-      final Device device = auth.getAuthenticatedDevice();
-      final Timer.Context timer = durationTimer.time();
-      final io.micrometer.core.instrument.Timer.Sample sample = io.micrometer.core.instrument.Timer.start();
+      final AuthenticatedDevice auth = context.getAuthenticated(AuthenticatedDevice.class);
       final WebSocketConnection connection = new WebSocketConnection(receiptSender,
-          messagesManager, auth, device,
+          messagesManager,
+          messageMetrics,
+          pushNotificationManager,
+          pushNotificationScheduler,
+          auth,
           context.getClient(),
           scheduledExecutorService,
           messageDeliveryScheduler,
-          clientReleaseManager);
-
-      openWebsocketAtomicInteger.incrementAndGet();
-      openWebsocketCounter.inc();
-
-      pushNotificationManager.handleMessagesRetrieved(auth.getAccount(), device, userAgent);
-
-      final AtomicReference<ScheduledFuture<?>> renewPresenceFutureReference = new AtomicReference<>();
+          clientReleaseManager,
+          messageDeliveryLoopMonitor);
 
       context.addWebsocketClosedListener((closingContext, statusCode, reason) -> {
-        openWebsocketAtomicInteger.decrementAndGet();
-        openWebsocketCounter.dec();
+        // We begin the shutdown process by removing this client's "presence," which means it will again begin to
+        // receive push notifications for inbound messages. We should do this first because, at this point, the
+        // connection has already closed and attempts to actually deliver a message via the connection will not succeed.
+        // It's preferable to start sending push notifications as soon as possible.
+        webSocketConnectionEventManager.handleClientDisconnected(auth.getAccount().getUuid(),
+            auth.getAuthenticatedDevice().getId());
 
-        timer.stop();
-        sample.stop(connectionTimer);
-
-        final ScheduledFuture<?> renewPresenceFuture = renewPresenceFutureReference.get();
-
-        if (renewPresenceFuture != null) {
-          renewPresenceFuture.cancel(false);
-        }
-
+        // Finally, stop trying to deliver messages and send a push notification if the connection is aware of any
+        // undelivered messages.
         connection.stop();
-
-        RedisOperation.unchecked(
-            () -> clientPresenceManager.clearPresence(auth.getAccount().getUuid(), device.getId()));
-        RedisOperation.unchecked(() -> {
-          messagesManager.removeMessageAvailabilityListener(connection);
-
-          if (messagesManager.hasCachedMessages(auth.getAccount().getUuid(), device.getId())) {
-            try {
-              pushNotificationManager.sendNewMessageNotification(auth.getAccount(), device.getId(), true);
-            } catch (NotPushRegisteredException ignored) {
-            }
-          }
-        });
       });
 
       try {
+        // Once we "start" the websocket connection, we'll cancel any scheduled "you may have new messages" push
+        // notifications and begin delivering any stored messages for the connected device. We have not yet declared the
+        // client as "present" yet. If a message arrives at this point, we will update the message availability state
+        // correctly, but we may also send a spurious push notification.
         connection.start();
-        clientPresenceManager.setPresent(auth.getAccount().getUuid(), device.getId(), connection);
-        messagesManager.addMessageAvailabilityListener(auth.getAccount().getUuid(), device.getId(), connection);
 
-        renewPresenceFutureReference.set(scheduledExecutorService.scheduleAtFixedRate(() -> RedisOperation.unchecked(() ->
-                clientPresenceManager.renewPresence(auth.getAccount().getUuid(), device.getId())),
-            RENEW_PRESENCE_INTERVAL_MINUTES,
-            RENEW_PRESENCE_INTERVAL_MINUTES,
-            TimeUnit.MINUTES));
+        // Finally, we register this client's presence, which suppresses push notifications. We do this last because
+        // receiving extra push notifications is generally preferable to missing out on a push notification.
+        webSocketConnectionEventManager.handleClientConnected(auth.getAccount().getUuid(), auth.getAuthenticatedDevice().getId(), connection);
       } catch (final Exception e) {
         log.warn("Failed to initialize websocket", e);
         context.getClient().close(1011, "Unexpected error initializing connection");
       }
-    } else {
-
-      openWebsocketAtomicInteger.incrementAndGet();
-      openWebsocketCounter.inc();
-
-      final Timer.Context timer = unauthenticatedDurationTimer.time();
-      final io.micrometer.core.instrument.Timer.Sample sample = io.micrometer.core.instrument.Timer.start();
-      context.addWebsocketClosedListener((context1, statusCode, reason) -> {
-        openWebsocketAtomicInteger.decrementAndGet();
-        openWebsocketCounter.dec();
-        timer.stop();
-        sample.stop(connectionTimer);
-      });
-    }
-  }
-
-  private AtomicInteger getOpenWebsocketCounter(final String userAgentString, final boolean authenticated) {
-    try {
-      final ClientPlatform platform = UserAgentUtil.parseUserAgentString(userAgentString).getPlatform();
-      return authenticated
-          ? openAuthenticatedWebsocketsByClientPlatform.get(platform)
-          : openUnauthenticatedWebsocketsByClientPlatform.get(platform);
-    } catch (final UnrecognizedUserAgentException e) {
-      return authenticated
-          ? openAuthenticatedWebsocketsFromUnknownPlatforms
-          : openUnauthenticatedWebsocketsFromUnknownPlatforms;
-    }
-  }
-
-  private io.micrometer.core.instrument.Timer getConnectionTimer(final String userAgentString,
-      final boolean authenticated) {
-    try {
-      final ClientPlatform platform = UserAgentUtil.parseUserAgentString(userAgentString).getPlatform();
-      return authenticated
-          ? durationTimersByClientPlatform.get(platform)
-          : unauthenticatedDurationTimersByClientPlatform.get(platform);
-    } catch (final UnrecognizedUserAgentException e) {
-      return authenticated
-          ? durationTimerForUnknownPlatforms
-          : unauthenticatedDurationTimerForUnknownPlatforms;
     }
   }
 }

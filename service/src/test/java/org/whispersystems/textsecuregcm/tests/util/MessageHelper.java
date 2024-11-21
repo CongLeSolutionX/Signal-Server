@@ -12,16 +12,16 @@ import org.whispersystems.textsecuregcm.entities.MessageProtos;
 
 public class MessageHelper {
 
-  public static MessageProtos.Envelope createMessage(UUID senderUuid, final int senderDeviceId, UUID destinationUuid,
+  public static MessageProtos.Envelope createMessage(UUID senderUuid, final byte senderDeviceId, UUID destinationUuid,
       long timestamp, String content) {
     return MessageProtos.Envelope.newBuilder()
         .setServerGuid(UUID.randomUUID().toString())
         .setType(MessageProtos.Envelope.Type.CIPHERTEXT)
-        .setTimestamp(timestamp)
+        .setClientTimestamp(timestamp)
         .setServerTimestamp(0)
-        .setSourceUuid(senderUuid.toString())
+        .setSourceServiceId(senderUuid.toString())
         .setSourceDevice(senderDeviceId)
-        .setDestinationUuid(destinationUuid.toString())
+        .setDestinationServiceId(destinationUuid.toString())
         .setContent(ByteString.copyFrom(content.getBytes(StandardCharsets.UTF_8)))
         .build();
   }

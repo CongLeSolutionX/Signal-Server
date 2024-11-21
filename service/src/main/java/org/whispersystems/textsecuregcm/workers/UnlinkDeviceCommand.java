@@ -6,17 +6,20 @@
 package org.whispersystems.textsecuregcm.workers;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import io.dropwizard.Application;
-import io.dropwizard.cli.EnvironmentCommand;
-import io.dropwizard.setup.Environment;
+import io.dropwizard.core.Application;
+import io.dropwizard.core.cli.EnvironmentCommand;
+import io.dropwizard.core.setup.Environment;
+
+import java.util.List;
 import java.util.UUID;
+import net.sourceforge.argparse4j.impl.Arguments;
 import net.sourceforge.argparse4j.inf.Namespace;
 import net.sourceforge.argparse4j.inf.Subparser;
 import org.whispersystems.textsecuregcm.WhisperServerConfiguration;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.Device;
 
-public class UnlinkDeviceCommand extends EnvironmentCommand<WhisperServerConfiguration> {
+public class UnlinkDeviceCommand extends AbstractCommandWithDependencies {
 
   public UnlinkDeviceCommand() {
     super(new Application<>() {
@@ -32,8 +35,9 @@ public class UnlinkDeviceCommand extends EnvironmentCommand<WhisperServerConfigu
     super.configure(subparser);
 
     subparser.addArgument("-d", "--deviceId")
-        .dest("deviceId")
-        .type(Long.class)
+        .dest("deviceIds")
+        .type(Byte.class)
+        .action(Arguments.append())
         .required(true);
 
     subparser.addArgument("-u", "--uuid")
@@ -45,36 +49,22 @@ public class UnlinkDeviceCommand extends EnvironmentCommand<WhisperServerConfigu
 
   @Override
   protected void run(final Environment environment, final Namespace namespace,
-      final WhisperServerConfiguration configuration) throws Exception {
-    environment.getObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
+      final WhisperServerConfiguration configuration,
+      final CommandDependencies deps) throws Exception {
     final UUID aci = UUID.fromString(namespace.getString("uuid").trim());
-    final long deviceId = namespace.getLong("deviceId");
-
-    final CommandDependencies deps = CommandDependencies.build("unlink-device", environment, configuration);
+    final List<Byte> deviceIds = namespace.getList("deviceIds");
 
     Account account = deps.accountsManager().getByAccountIdentifier(aci)
-        .orElseThrow(() -> new IllegalArgumentException("account id " + aci +" does not exist"));
+        .orElseThrow(() -> new IllegalArgumentException("account id " + aci + " does not exist"));
 
-    if (deviceId == Device.MASTER_ID) {
+    if (deviceIds.contains(Device.PRIMARY_ID)) {
       throw new IllegalArgumentException("cannot delete primary device");
     }
 
-    /** see {@link org.whispersystems.textsecuregcm.controllers.DeviceController#removeDevice} */
-    System.out.format("Removing device %s::%d\n", aci, deviceId);
-    account = deps.accountsManager().update(account, a -> a.removeDevice(deviceId));
-
-    System.out.format("Removing keys for device %s::%d\n", aci, deviceId);
-    deps.keysManager().delete(account.getUuid(), deviceId).join();
-
-    System.out.format("Clearing additional messages for %s::%d\n", aci, deviceId);
-    deps.messagesManager().clear(account.getUuid(), deviceId).join();
-
-    System.out.format("Clearing presence state for %s::%d\n", aci, deviceId);
-    deps.clientPresenceManager().disconnectPresence(aci, deviceId);
-
-    System.out.format("Device %s::%d successfully removed\n", aci, deviceId);
-
-
+    for (byte deviceId : deviceIds) {
+      /** see {@link org.whispersystems.textsecuregcm.controllers.DeviceController#removeDevice} */
+      System.out.format("Removing device %s::%d\n", aci, deviceId);
+      deps.accountsManager().removeDevice(account, deviceId).join();
+    }
   }
 }

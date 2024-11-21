@@ -45,21 +45,46 @@ class DynamicConfigurationTest {
     }
 
     {
+      final String invalid = REQUIRED_CONFIG.concat("""
+          experiments:
+            percentageOnly:
+              enrollmentPercentage: 12
+            uuidsAndPercentage:
+              uuidSelector:
+                # the below results in uuids = null
+                uuids:
+          """);
+      final Optional<DynamicConfiguration> maybeConfig =
+          DynamicConfigurationManager.parseConfiguration(invalid, DynamicConfiguration.class);
+
+      assertFalse(maybeConfig.isPresent());
+    }
+
+    {
       final String experimentConfigYaml = REQUIRED_CONFIG.concat("""
           experiments:
             percentageOnly:
               enrollmentPercentage: 12
             uuidsAndPercentage:
-              enrolledUuids:
-                - 717b1c09-ed0b-4120-bb0e-f4697534b8e1
-                - 279f264c-56d7-4bbf-b9da-de718ff90903
+              uuidSelector:
+                uuids:
+                  - 717b1c09-ed0b-4120-bb0e-f4697534b8e1
+                  - 279f264c-56d7-4bbf-b9da-de718ff90903
               enrollmentPercentage: 77
             uuidsOnly:
-              enrolledUuids:
+              uuidSelector:
+                uuids:
                 - 71618739-114c-4b1f-bb0d-6478a44eb600
             uuids-with-dash:
-              enrolledUuids:
-                - 71618739-114c-4b1f-bb0d-6478ffffffff
+              uuidSelector:
+                uuids:
+                  - 71618739-114c-4b1f-bb0d-6478ffffffff
+            uuidsAndSubSelection:
+              uuidSelector:
+                uuids:
+                  - 6664224c-20cc-45a0-829b-95059e8a04f5
+                uuidEnrollmentPercentage: 91
+              enrollmentPercentage: 71
           """);
 
       final DynamicConfiguration config =
@@ -67,27 +92,35 @@ class DynamicConfigurationTest {
 
       assertFalse(config.getExperimentEnrollmentConfiguration("unconfigured").isPresent());
 
-      assertTrue(config.getExperimentEnrollmentConfiguration("percentageOnly").isPresent());
-      assertEquals(12, config.getExperimentEnrollmentConfiguration("percentageOnly").get().getEnrollmentPercentage());
-      assertEquals(Collections.emptySet(),
-          config.getExperimentEnrollmentConfiguration("percentageOnly").get().getEnrolledUuids());
+      final DynamicExperimentEnrollmentConfiguration percentageOnly = config.getExperimentEnrollmentConfiguration("percentageOnly").orElseThrow();
+      assertEquals(12, percentageOnly.getEnrollmentPercentage());
+      assertEquals(Collections.emptySet(), percentageOnly.getUuidSelector().getUuids());
+      assertEquals(100, percentageOnly.getUuidSelector().getUuidEnrollmentPercentage());
 
-      assertTrue(config.getExperimentEnrollmentConfiguration("uuidsAndPercentage").isPresent());
-      assertEquals(77,
-          config.getExperimentEnrollmentConfiguration("uuidsAndPercentage").get().getEnrollmentPercentage());
+      final DynamicExperimentEnrollmentConfiguration uuidsAndPercentage = config.getExperimentEnrollmentConfiguration("uuidsAndPercentage").orElseThrow();
+      assertEquals(77, uuidsAndPercentage.getEnrollmentPercentage());
       assertEquals(Set.of(UUID.fromString("717b1c09-ed0b-4120-bb0e-f4697534b8e1"),
           UUID.fromString("279f264c-56d7-4bbf-b9da-de718ff90903")),
-          config.getExperimentEnrollmentConfiguration("uuidsAndPercentage").get().getEnrolledUuids());
+          uuidsAndPercentage.getUuidSelector().getUuids());
+      assertEquals(100, uuidsAndPercentage.getUuidSelector().getUuidEnrollmentPercentage());
 
-      assertTrue(config.getExperimentEnrollmentConfiguration("uuidsOnly").isPresent());
-      assertEquals(0, config.getExperimentEnrollmentConfiguration("uuidsOnly").get().getEnrollmentPercentage());
+      final DynamicExperimentEnrollmentConfiguration uuidsOnly = config.getExperimentEnrollmentConfiguration("uuidsOnly").orElseThrow();
+      assertEquals(0, uuidsOnly.getEnrollmentPercentage());
       assertEquals(Set.of(UUID.fromString("71618739-114c-4b1f-bb0d-6478a44eb600")),
-          config.getExperimentEnrollmentConfiguration("uuidsOnly").get().getEnrolledUuids());
+          uuidsOnly.getUuidSelector().getUuids());
+      assertEquals(100, uuidsOnly.getUuidSelector().getUuidEnrollmentPercentage());
 
-      assertTrue(config.getExperimentEnrollmentConfiguration("uuids-with-dash").isPresent());
-      assertEquals(0, config.getExperimentEnrollmentConfiguration("uuids-with-dash").get().getEnrollmentPercentage());
+      final DynamicExperimentEnrollmentConfiguration uuidsWithDash = config.getExperimentEnrollmentConfiguration("uuids-with-dash").orElseThrow();
+      assertEquals(0, uuidsWithDash.getEnrollmentPercentage());
       assertEquals(Set.of(UUID.fromString("71618739-114c-4b1f-bb0d-6478ffffffff")),
-          config.getExperimentEnrollmentConfiguration("uuids-with-dash").get().getEnrolledUuids());
+          uuidsWithDash.getUuidSelector().getUuids());
+      assertEquals(100, uuidsWithDash.getUuidSelector().getUuidEnrollmentPercentage());
+
+      final DynamicExperimentEnrollmentConfiguration uuidsAndSubSelection = config.getExperimentEnrollmentConfiguration("uuidsAndSubSelection").orElseThrow();
+      assertEquals(71, uuidsAndSubSelection.getEnrollmentPercentage());
+      assertEquals(Set.of(UUID.fromString("6664224c-20cc-45a0-829b-95059e8a04f5")),
+          uuidsAndSubSelection.getUuidSelector().getUuids());
+      assertEquals(91, uuidsAndSubSelection.getUuidSelector().getUuidEnrollmentPercentage());
     }
   }
 
@@ -249,8 +282,6 @@ class DynamicConfigurationTest {
     {
       final String captchaConfig = """
           captcha:
-            signupCountryCodes:
-              - 1
             scoreFloor: null
           """;
 
@@ -261,8 +292,6 @@ class DynamicConfigurationTest {
     {
       final String captchaConfig = """
           captcha:
-            signupCountryCodes:
-              - 1
             scoreFloor: 0.9
             scoreFloorByAction:
               challenge: 0.1
@@ -273,16 +302,12 @@ class DynamicConfigurationTest {
               registration:
                 - e4ddb6ff-05e7-497b-9a29-b76e7331789c
                 - 52fdbc88-f246-4705-a7dd-05ad85b93420
-            recaptchaSiteKeys:
-              challenge:
-                - 299068b6-ac78-4288-a90b-2e2ce5a6ddfe
           """;
 
       final DynamicCaptchaConfiguration config =
           DynamicConfigurationManager.parseConfiguration(captchaConfig, DynamicConfiguration.class).orElseThrow()
               .getCaptchaConfiguration();
 
-      assertEquals(Set.of("1"), config.getSignupCountryCodes());
       assertEquals(0.9f, config.getScoreFloor().floatValue());
       assertEquals(0.1f, config.getScoreFloorByAction().get(Action.CHALLENGE).floatValue());
       assertEquals(0.2f, config.getScoreFloorByAction().get(Action.REGISTRATION).floatValue());
@@ -290,9 +315,6 @@ class DynamicConfigurationTest {
       assertThat(config.getHCaptchaSiteKeys().get(Action.CHALLENGE)).contains("ab317f2a-2b76-4098-84c9-ecdf8ea44f53");
       assertThat(config.getHCaptchaSiteKeys().get(Action.REGISTRATION)).contains("e4ddb6ff-05e7-497b-9a29-b76e7331789c");
       assertThat(config.getHCaptchaSiteKeys().get(Action.REGISTRATION)).contains("52fdbc88-f246-4705-a7dd-05ad85b93420");
-
-      assertThat(config.getRecaptchaSiteKeys().get(Action.CHALLENGE)).contains("299068b6-ac78-4288-a90b-2e2ce5a6ddfe");
-      assertThat(config.getRecaptchaSiteKeys().get(Action.REGISTRATION)).isNull();
     }
   }
 
@@ -338,6 +360,8 @@ class DynamicConfigurationTest {
                   weight: 2
                   enrolledAcis:
                     - 732506d7-d04f-43a4-b1d7-8a3a91ebe8a6
+            randomizeRate: 100_000
+            hostname: test.domain.org
            """);
       DynamicTurnConfiguration turnConfiguration = DynamicConfigurationManager
           .parseConfiguration(config, DynamicConfiguration.class)
@@ -350,6 +374,8 @@ class DynamicConfigurationTest {
       assertThat(turnConfiguration.getUriConfigs().get(1).getEnrolledAcis())
           .containsExactly(UUID.fromString("732506d7-d04f-43a4-b1d7-8a3a91ebe8a6"));
 
+      assertThat(turnConfiguration.getHostname()).isEqualTo("test.domain.org");
+      assertThat(turnConfiguration.getRandomizeRate()).isEqualTo(100_000L);
     }
   }
 

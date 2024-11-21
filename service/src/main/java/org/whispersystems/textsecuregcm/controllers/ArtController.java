@@ -7,16 +7,17 @@ package org.whispersystems.textsecuregcm.controllers;
 
 import io.dropwizard.auth.Auth;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
 import java.util.UUID;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentials;
 import org.whispersystems.textsecuregcm.auth.ExternalServiceCredentialsGenerator;
 import org.whispersystems.textsecuregcm.configuration.ArtServiceConfiguration;
 import org.whispersystems.textsecuregcm.limits.RateLimiters;
+import org.whispersystems.websocket.auth.ReadOnly;
 
 @Path("/v1/art")
 @Tag(name = "Art")
@@ -42,10 +43,10 @@ public class ArtController {
   @GET
   @Path("/auth")
   @Produces(MediaType.APPLICATION_JSON)
-  public ExternalServiceCredentials getAuth(final @Auth AuthenticatedAccount auth)
+  public ExternalServiceCredentials getAuth(final @ReadOnly @Auth AuthenticatedDevice auth)
     throws RateLimitExceededException {
     final UUID uuid = auth.getAccount().getUuid();
-    rateLimiters.getArtPackLimiter().validate(uuid);
+    rateLimiters.forDescriptor(RateLimiters.For.EXTERNAL_SERVICE_CREDENTIALS).validate(uuid);
     return artServiceCredentialsGenerator.generateForUuid(uuid);
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2021 Signal Messenger, LLC
+ * Copyright 2013 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
@@ -11,7 +11,6 @@ import com.google.common.annotations.VisibleForTesting;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Timer;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +22,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.whispersystems.textsecuregcm.util.AsyncTimerUtil;
 import org.whispersystems.textsecuregcm.util.AttributeValues;
 import org.whispersystems.textsecuregcm.util.Util;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -31,7 +32,6 @@ import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.QueryRequest;
 import software.amazon.awssdk.services.dynamodb.model.UpdateItemRequest;
-import software.amazon.awssdk.services.dynamodb.paginators.QueryIterable;
 
 public class Profiles {
 
@@ -47,20 +47,23 @@ public class Profiles {
   @VisibleForTesting
   static final String ATTR_VERSION = "V";
 
-  // User's name; string
+  // User's name; byte array
   private static final String ATTR_NAME = "N";
 
   // Avatar path/filename; string
   private static final String ATTR_AVATAR = "A";
 
-  // Bio/about text; string
+  // Bio/about text; byte array
   private static final String ATTR_ABOUT = "B";
 
-  // Bio/about emoji; string
+  // Bio/about emoji; byte array
   private static final String ATTR_EMOJI = "E";
 
-  // Payment address; string
+  // Payment address; byte array
   private static final String ATTR_PAYMENT_ADDRESS = "P";
+
+  // Phone number sharing setting; byte array
+  private static final String ATTR_PHONE_NUMBER_SHARING = "S";
 
   // Commitment; byte array
   private static final String ATTR_COMMITMENT = "C";
@@ -71,12 +74,15 @@ public class Profiles {
       "#avatar", ATTR_AVATAR,
       "#about", ATTR_ABOUT,
       "#aboutEmoji", ATTR_EMOJI,
-      "#paymentAddress", ATTR_PAYMENT_ADDRESS);
+      "#paymentAddress", ATTR_PAYMENT_ADDRESS,
+      "#phoneNumberSharing", ATTR_PHONE_NUMBER_SHARING);
 
   private static final Timer SET_PROFILES_TIMER = Metrics.timer(name(Profiles.class, "set"));
   private static final Timer GET_PROFILE_TIMER = Metrics.timer(name(Profiles.class, "get"));
-  private static final Timer DELETE_PROFILES_TIMER = Metrics.timer(name(Profiles.class, "delete"));
+  private static final String DELETE_PROFILES_TIMER_NAME = name(Profiles.class, "delete");
   private static final String PARSE_BYTE_ARRAY_COUNTER_NAME = name(Profiles.class, "parseByteArray");
+
+  private static final int MAX_CONCURRENCY = 32;
 
   public Profiles(final DynamoDbClient dynamoDbClient,
       final DynamoDbAsyncClient dynamoDbAsyncClient,
@@ -91,7 +97,7 @@ public class Profiles {
     SET_PROFILES_TIMER.record(() -> {
       dynamoDbClient.updateItem(UpdateItemRequest.builder()
           .tableName(tableName)
-          .key(buildPrimaryKey(uuid, profile.getVersion()))
+          .key(buildPrimaryKey(uuid, profile.version()))
           .updateExpression(buildUpdateExpression(profile))
           .expressionAttributeNames(UPDATE_EXPRESSION_ATTRIBUTE_NAMES)
           .expressionAttributeValues(buildUpdateExpressionAttributeValues(profile))
@@ -102,7 +108,7 @@ public class Profiles {
   public CompletableFuture<Void> setAsync(final UUID uuid, final VersionedProfile profile) {
     return AsyncTimerUtil.record(SET_PROFILES_TIMER, () -> dynamoDbAsyncClient.updateItem(UpdateItemRequest.builder()
             .tableName(tableName)
-            .key(buildPrimaryKey(uuid, profile.getVersion()))
+            .key(buildPrimaryKey(uuid, profile.version()))
             .updateExpression(buildUpdateExpression(profile))
             .expressionAttributeNames(UPDATE_EXPRESSION_ATTRIBUTE_NAMES)
             .expressionAttributeValues(buildUpdateExpressionAttributeValues(profile))
@@ -122,34 +128,40 @@ public class Profiles {
     final List<String> updatedAttributes = new ArrayList<>(5);
     final List<String> deletedAttributes = new ArrayList<>(5);
 
-    if (StringUtils.isNotBlank(profile.getName())) {
+    if (profile.name() != null) {
       updatedAttributes.add("name");
     } else {
       deletedAttributes.add("name");
     }
 
-    if (StringUtils.isNotBlank(profile.getAvatar())) {
+    if (StringUtils.isNotBlank(profile.avatar())) {
       updatedAttributes.add("avatar");
     } else {
       deletedAttributes.add("avatar");
     }
 
-    if (StringUtils.isNotBlank(profile.getAbout())) {
+    if (profile.about() != null) {
       updatedAttributes.add("about");
     } else {
       deletedAttributes.add("about");
     }
 
-    if (StringUtils.isNotBlank(profile.getAboutEmoji())) {
+    if (profile.aboutEmoji() != null) {
       updatedAttributes.add("aboutEmoji");
     } else {
       deletedAttributes.add("aboutEmoji");
     }
 
-    if (StringUtils.isNotBlank(profile.getPaymentAddress())) {
+    if (profile.paymentAddress() != null) {
       updatedAttributes.add("paymentAddress");
     } else {
       deletedAttributes.add("paymentAddress");
+    }
+
+    if (profile.phoneNumberSharing() != null) {
+      updatedAttributes.add("phoneNumberSharing");
+    } else {
+      deletedAttributes.add("phoneNumberSharing");
     }
 
     final StringBuilder updateExpressionBuilder = new StringBuilder(
@@ -176,29 +188,32 @@ public class Profiles {
   @VisibleForTesting
   static Map<String, AttributeValue> buildUpdateExpressionAttributeValues(final VersionedProfile profile) {
     final Map<String, AttributeValue> expressionValues = new HashMap<>();
-    
-    expressionValues.put(":commitment", AttributeValues.fromByteArray(profile.getCommitment()));
 
-    if (StringUtils.isNotBlank(profile.getName())) {
-      expressionValues.put(":name", AttributeValues.fromString(profile.getName()));
+    expressionValues.put(":commitment", AttributeValues.fromByteArray(profile.commitment()));
+
+    if (profile.name() != null) {
+      expressionValues.put(":name", AttributeValues.fromByteArray(profile.name()));
     }
 
-    if (StringUtils.isNotBlank(profile.getAvatar())) {
-      expressionValues.put(":avatar", AttributeValues.fromString(profile.getAvatar()));
+    if (StringUtils.isNotBlank(profile.avatar())) {
+      expressionValues.put(":avatar", AttributeValues.fromString(profile.avatar()));
     }
 
-    if (StringUtils.isNotBlank(profile.getAbout())) {
-      expressionValues.put(":about", AttributeValues.fromString(profile.getAbout()));
+    if (profile.about() != null) {
+      expressionValues.put(":about", AttributeValues.fromByteArray(profile.about()));
     }
 
-    if (StringUtils.isNotBlank(profile.getAboutEmoji())) {
-      expressionValues.put(":aboutEmoji", AttributeValues.fromString(profile.getAboutEmoji()));
+    if (profile.aboutEmoji() != null) {
+      expressionValues.put(":aboutEmoji", AttributeValues.fromByteArray(profile.aboutEmoji()));
     }
 
-    if (StringUtils.isNotBlank(profile.getPaymentAddress())) {
-      expressionValues.put(":paymentAddress", AttributeValues.fromString(profile.getPaymentAddress()));
+    if (profile.paymentAddress() != null) {
+      expressionValues.put(":paymentAddress", AttributeValues.fromByteArray(profile.paymentAddress()));
     }
-    
+
+    if (profile.phoneNumberSharing() != null) {
+      expressionValues.put(":phoneNumberSharing", AttributeValues.fromByteArray(profile.phoneNumberSharing()));
+    }
     return expressionValues;
   }
 
@@ -228,44 +243,47 @@ public class Profiles {
   private static VersionedProfile fromItem(final Map<String, AttributeValue> item) {
     return new VersionedProfile(
         AttributeValues.getString(item, ATTR_VERSION, null),
-        getBase64EncodedBytes(item, ATTR_NAME, PARSE_BYTE_ARRAY_COUNTER_NAME),
+        getBytes(item, ATTR_NAME),
         AttributeValues.getString(item, ATTR_AVATAR, null),
-        getBase64EncodedBytes(item, ATTR_EMOJI, PARSE_BYTE_ARRAY_COUNTER_NAME),
-        getBase64EncodedBytes(item, ATTR_ABOUT, PARSE_BYTE_ARRAY_COUNTER_NAME),
-        getBase64EncodedBytes(item, ATTR_PAYMENT_ADDRESS, PARSE_BYTE_ARRAY_COUNTER_NAME),
+        getBytes(item, ATTR_EMOJI),
+        getBytes(item, ATTR_ABOUT),
+        getBytes(item, ATTR_PAYMENT_ADDRESS),
+        getBytes(item, ATTR_PHONE_NUMBER_SHARING),
         AttributeValues.getByteArray(item, ATTR_COMMITMENT, null));
   }
 
-  private static String getBase64EncodedBytes(final Map<String, AttributeValue> item, final String attributeName, final String counterName) {
+  private static byte[] getBytes(final Map<String, AttributeValue> item, final String attributeName) {
     final AttributeValue attributeValue = item.get(attributeName);
 
     if (attributeValue == null) {
       return null;
     }
-    return Base64.getEncoder().encodeToString(AttributeValues.extractByteArray(attributeValue, counterName));
+    return AttributeValues.extractByteArray(attributeValue, PARSE_BYTE_ARRAY_COUNTER_NAME);
   }
 
-  public void deleteAll(final UUID uuid) {
-    DELETE_PROFILES_TIMER.record(() -> {
-      final AttributeValue uuidAttributeValue = AttributeValues.fromUUID(uuid);
+  public CompletableFuture<Void> deleteAll(final UUID uuid) {
+    final Timer.Sample sample = Timer.start();
 
-      final QueryIterable queryIterable = dynamoDbClient.queryPaginator(QueryRequest.builder()
-          .tableName(tableName)
-          .keyConditionExpression("#uuid = :uuid")
-          .expressionAttributeNames(Map.of("#uuid", KEY_ACCOUNT_UUID))
-          .expressionAttributeValues(Map.of(":uuid", uuidAttributeValue))
-          .projectionExpression(ATTR_VERSION)
-          .consistentRead(true)
-          .build());
+    final AttributeValue uuidAttributeValue = AttributeValues.fromUUID(uuid);
 
-      CompletableFuture.allOf(queryIterable.items().stream()
-          .map(item -> dynamoDbAsyncClient.deleteItem(DeleteItemRequest.builder()
-              .tableName(tableName)
-              .key(Map.of(
-                  KEY_ACCOUNT_UUID, uuidAttributeValue,
-                  ATTR_VERSION, item.get(ATTR_VERSION)))
-              .build()))
-          .toArray(CompletableFuture[]::new)).join();
-    });
+    return Flux.from(dynamoDbAsyncClient.queryPaginator(QueryRequest.builder()
+                .tableName(tableName)
+                .keyConditionExpression("#uuid = :uuid")
+                .expressionAttributeNames(Map.of("#uuid", KEY_ACCOUNT_UUID))
+                .expressionAttributeValues(Map.of(":uuid", uuidAttributeValue))
+                .projectionExpression(ATTR_VERSION)
+                .consistentRead(true)
+                .build())
+            .items())
+        .flatMap(item -> Mono.fromFuture(() -> dynamoDbAsyncClient.deleteItem(DeleteItemRequest.builder()
+            .tableName(tableName)
+            .key(Map.of(
+                KEY_ACCOUNT_UUID, uuidAttributeValue,
+                ATTR_VERSION, item.get(ATTR_VERSION)))
+            .build())), MAX_CONCURRENCY)
+        .then()
+        .doOnSuccess(ignored -> sample.stop(Metrics.timer(DELETE_PROFILES_TIMER_NAME, "outcome", "success")))
+        .doOnError(ignored -> sample.stop(Metrics.timer(DELETE_PROFILES_TIMER_NAME, "outcome", "error")))
+        .toFuture();
   }
 }

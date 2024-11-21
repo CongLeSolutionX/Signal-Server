@@ -11,45 +11,53 @@ import java.time.Duration;
 import java.util.Map;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.redis.ClusterLuaScript;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 
 public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
 
   public enum For implements RateLimiterDescriptor {
-    BACKUP_AUTH_CHECK("backupAuthCheck", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
-    SMS_DESTINATION("smsDestination", false, new RateLimiterConfig(2, Duration.ofMillis(500))),
-    VOICE_DESTINATION("voxDestination", false, new RateLimiterConfig(2, Duration.ofSeconds(2))),
-    VOICE_DESTINATION_DAILY("voxDestinationDaily", false, new RateLimiterConfig(10, Duration.ofSeconds(144))),
-    SMS_VOICE_IP("smsVoiceIp", false, new RateLimiterConfig(1000, Duration.ofMillis(1))),
-    SMS_VOICE_PREFIX("smsVoicePrefix", false, new RateLimiterConfig(1000, Duration.ofMillis(1))),
-    VERIFY("verify", false, new RateLimiterConfig(6, Duration.ofMillis(500))),
-    PIN("pin", false, new RateLimiterConfig(10, Duration.ofMinutes(24))),
-    ATTACHMENT("attachmentCreate", false, new RateLimiterConfig(50, Duration.ofMillis(20))),
-    PRE_KEYS("prekeys", false, new RateLimiterConfig(6, Duration.ofSeconds(10))),
-    MESSAGES("messages", false, new RateLimiterConfig(60, Duration.ofMillis(17))),
-    ALLOCATE_DEVICE("allocateDevice", false, new RateLimiterConfig(2, Duration.ofSeconds(2))),
-    VERIFY_DEVICE("verifyDevice", false, new RateLimiterConfig(6, Duration.ofSeconds(10))),
-    TURN("turnAllocate", false, new RateLimiterConfig(60, Duration.ofMillis(17))),
-    PROFILE("profile", false, new RateLimiterConfig(4320, Duration.ofMillis(333))),
-    STICKER_PACK("stickerPack", false, new RateLimiterConfig(50, Duration.ofSeconds(72))),
-    ART_PACK("artPack", false, new RateLimiterConfig(50, Duration.ofSeconds(72))),
-    USERNAME_LOOKUP("usernameLookup", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
-    USERNAME_SET("usernameSet", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
-    USERNAME_RESERVE("usernameReserve", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
+    BACKUP_AUTH_CHECK("backupAuthCheck", false, new RateLimiterConfig(100, Duration.ofMinutes(15))),
+    PIN("pin", false, new RateLimiterConfig(10, Duration.ofDays(1))),
+    ATTACHMENT("attachmentCreate", false, new RateLimiterConfig(50, Duration.ofMillis(1200))),
+    BACKUP_ATTACHMENT("backupAttachmentCreate", true, new RateLimiterConfig(10_000, Duration.ofSeconds(1))),
+    PRE_KEYS("prekeys", false, new RateLimiterConfig(6, Duration.ofMinutes(10))),
+    MESSAGES("messages", false, new RateLimiterConfig(60, Duration.ofSeconds(1))),
+    STORIES("stories", false, new RateLimiterConfig(5_000, Duration.ofSeconds(8))),
+    ALLOCATE_DEVICE("allocateDevice", false, new RateLimiterConfig(6, Duration.ofMinutes(2))),
+    VERIFY_DEVICE("verifyDevice", false, new RateLimiterConfig(6, Duration.ofMinutes(2))),
+    TURN("turnAllocate", false, new RateLimiterConfig(60, Duration.ofSeconds(1))),
+    PROFILE("profile", false, new RateLimiterConfig(4320, Duration.ofSeconds(20))),
+    STICKER_PACK("stickerPack", false, new RateLimiterConfig(50, Duration.ofMinutes(72))),
+    USERNAME_LOOKUP("usernameLookup", false, new RateLimiterConfig(100, Duration.ofMinutes(15))),
+    USERNAME_SET("usernameSet", false, new RateLimiterConfig(100, Duration.ofMinutes(15))),
+    USERNAME_RESERVE("usernameReserve", false, new RateLimiterConfig(100, Duration.ofMinutes(15))),
     USERNAME_LINK_OPERATION("usernameLinkOperation", false, new RateLimiterConfig(10, Duration.ofMinutes(1))),
     USERNAME_LINK_LOOKUP_PER_IP("usernameLinkLookupPerIp", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
-    CHECK_ACCOUNT_EXISTENCE("checkAccountExistence", false, new RateLimiterConfig(1000, Duration.ofMillis(60))),
-    REGISTRATION("registration", false, new RateLimiterConfig(6, Duration.ofMillis(500))),
-    VERIFICATION_PUSH_CHALLENGE("verificationPushChallenge", false, new RateLimiterConfig(5, Duration.ofMillis(500))),
-    VERIFICATION_CAPTCHA("verificationCaptcha", false, new RateLimiterConfig(10, Duration.ofMillis(500))),
-    RATE_LIMIT_RESET("rateLimitReset", true, new RateLimiterConfig(2, Duration.ofMinutes(12))),
-    RECAPTCHA_CHALLENGE_ATTEMPT("recaptchaChallengeAttempt", true, new RateLimiterConfig(10, Duration.ofSeconds(144))),
-    RECAPTCHA_CHALLENGE_SUCCESS("recaptchaChallengeSuccess", true, new RateLimiterConfig(2, Duration.ofMinutes(12))),
-    PUSH_CHALLENGE_ATTEMPT("pushChallengeAttempt", true, new RateLimiterConfig(10, Duration.ofSeconds(144))),
-    PUSH_CHALLENGE_SUCCESS("pushChallengeSuccess", true, new RateLimiterConfig(2, Duration.ofMinutes(12))),
-    CREATE_CALL_LINK("createCallLink", false, new RateLimiterConfig(100, Duration.ofSeconds(15))),
-    INBOUND_MESSAGE_BYTES("inboundMessageBytes", true, new RateLimiterConfig(128 * 1024 * 1024, Duration.ofNanos(500_000)));
+    CHECK_ACCOUNT_EXISTENCE("checkAccountExistence", false, new RateLimiterConfig(1000, Duration.ofSeconds(4))),
+    REGISTRATION("registration", false, new RateLimiterConfig(6, Duration.ofSeconds(30))),
+    VERIFICATION_PUSH_CHALLENGE("verificationPushChallenge", false, new RateLimiterConfig(5, Duration.ofSeconds(30))),
+    VERIFICATION_CAPTCHA("verificationCaptcha", false, new RateLimiterConfig(10, Duration.ofSeconds(30))),
+    RATE_LIMIT_RESET("rateLimitReset", true, new RateLimiterConfig(2, Duration.ofHours(12))),
+    CAPTCHA_CHALLENGE_ATTEMPT("captchaChallengeAttempt", true, new RateLimiterConfig(10, Duration.ofMinutes(144))),
+    CAPTCHA_CHALLENGE_SUCCESS("captchaChallengeSuccess", true, new RateLimiterConfig(2, Duration.ofHours(12))),
+    SET_BACKUP_ID("setBackupId", true, new RateLimiterConfig(2, Duration.ofDays(7))),
+    PUSH_CHALLENGE_ATTEMPT("pushChallengeAttempt", true, new RateLimiterConfig(10, Duration.ofMinutes(144))),
+    PUSH_CHALLENGE_SUCCESS("pushChallengeSuccess", true, new RateLimiterConfig(2, Duration.ofHours(12))),
+    GET_CALLING_RELAYS("getCallingRelays", false, new RateLimiterConfig(100, Duration.ofMinutes(10))),
+    CREATE_CALL_LINK("createCallLink", false, new RateLimiterConfig(100, Duration.ofMinutes(15))),
+    INBOUND_MESSAGE_BYTES("inboundMessageBytes", true, new RateLimiterConfig(128 * 1024 * 1024, Duration.ofNanos(500_000))),
+    EXTERNAL_SERVICE_CREDENTIALS("externalServiceCredentials", true, new RateLimiterConfig(100, Duration.ofMinutes(15))),
+    KEY_TRANSPARENCY_DISTINGUISHED_PER_IP("keyTransparencyDistinguished", true,
+        new RateLimiterConfig(100, Duration.ofSeconds(15))),
+    KEY_TRANSPARENCY_SEARCH_PER_IP("keyTransparencySearch", true, new RateLimiterConfig(100, Duration.ofSeconds(15))),
+    KEY_TRANSPARENCY_MONITOR_PER_IP("keyTransparencyMonitor", true, new RateLimiterConfig(100, Duration.ofSeconds(15))),
+    WAIT_FOR_LINKED_DEVICE("waitForLinkedDevice", true, new RateLimiterConfig(10, Duration.ofSeconds(30))),
+    UPLOAD_TRANSFER_ARCHIVE("uploadTransferArchive", true, new RateLimiterConfig(10, Duration.ofMinutes(1))),
+    WAIT_FOR_TRANSFER_ARCHIVE("waitForTransferArchive", true, new RateLimiterConfig(10, Duration.ofSeconds(30))),
+    RECORD_DEVICE_TRANSFER_REQUEST("recordDeviceTransferRequest", true, new RateLimiterConfig(10, Duration.ofMillis(100))),
+    WAIT_FOR_DEVICE_TRANSFER_REQUEST("waitForDeviceTransferRequest", true, new RateLimiterConfig(10, Duration.ofMillis(100))),
+    ;
 
     private final String id;
 
@@ -80,7 +88,7 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
   public static RateLimiters createAndValidate(
       final Map<String, RateLimiterConfig> configs,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
-      final FaultTolerantRedisCluster cacheCluster) {
+      final FaultTolerantRedisClusterClient cacheCluster) {
     final RateLimiters rateLimiters = new RateLimiters(
         configs, dynamicConfigurationManager, defaultScript(cacheCluster), cacheCluster, Clock.systemUTC());
     rateLimiters.validateValuesAndConfigs();
@@ -92,7 +100,7 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
       final Map<String, RateLimiterConfig> configs,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final ClusterLuaScript validateScript,
-      final FaultTolerantRedisCluster cacheCluster,
+      final FaultTolerantRedisClusterClient cacheCluster,
       final Clock clock) {
     super(For.values(), configs, dynamicConfigurationManager, validateScript, cacheCluster, clock);
   }
@@ -117,30 +125,6 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
     return forDescriptor(For.ATTACHMENT);
   }
 
-  public RateLimiter getSmsDestinationLimiter() {
-    return forDescriptor(For.SMS_DESTINATION);
-  }
-
-  public RateLimiter getSmsVoiceIpLimiter() {
-    return forDescriptor(For.SMS_VOICE_IP);
-  }
-
-  public RateLimiter getSmsVoicePrefixLimiter() {
-    return forDescriptor(For.SMS_VOICE_PREFIX);
-  }
-
-  public RateLimiter getVoiceDestinationLimiter() {
-    return forDescriptor(For.VOICE_DESTINATION);
-  }
-
-  public RateLimiter getVoiceDestinationDailyLimiter() {
-    return forDescriptor(For.VOICE_DESTINATION_DAILY);
-  }
-
-  public RateLimiter getVerifyLimiter() {
-    return forDescriptor(For.VERIFY);
-  }
-
   public RateLimiter getPinLimiter() {
     return forDescriptor(For.PIN);
   }
@@ -157,12 +141,16 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
     return forDescriptor(For.STICKER_PACK);
   }
 
-  public RateLimiter getArtPackLimiter() {
-    return forDescriptor(For.ART_PACK);
-  }
-
   public RateLimiter getUsernameLookupLimiter() {
     return forDescriptor(For.USERNAME_LOOKUP);
+  }
+
+  public RateLimiter getUsernameLinkLookupLimiter() {
+    return forDescriptor(For.USERNAME_LINK_LOOKUP_PER_IP);
+  }
+
+  public RateLimiter getUsernameLinkOperationLimiter() {
+    return forDescriptor(For.USERNAME_LINK_OPERATION);
   }
 
   public RateLimiter getUsernameSetLimiter() {
@@ -185,12 +173,12 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
     return forDescriptor(For.RATE_LIMIT_RESET);
   }
 
-  public RateLimiter getRecaptchaChallengeAttemptLimiter() {
-    return forDescriptor(For.RECAPTCHA_CHALLENGE_ATTEMPT);
+  public RateLimiter getCaptchaChallengeAttemptLimiter() {
+    return forDescriptor(For.CAPTCHA_CHALLENGE_ATTEMPT);
   }
 
-  public RateLimiter getRecaptchaChallengeSuccessLimiter() {
-    return forDescriptor(For.RECAPTCHA_CHALLENGE_SUCCESS);
+  public RateLimiter getCaptchaChallengeSuccessLimiter() {
+    return forDescriptor(For.CAPTCHA_CHALLENGE_SUCCESS);
   }
 
   public RateLimiter getPushChallengeAttemptLimiter() {
@@ -213,7 +201,27 @@ public class RateLimiters extends BaseRateLimiters<RateLimiters.For> {
     return forDescriptor(For.CREATE_CALL_LINK);
   }
 
+  public RateLimiter getCallEndpointLimiter() {
+    return forDescriptor(For.GET_CALLING_RELAYS);
+  }
+
   public RateLimiter getInboundMessageBytes() {
     return forDescriptor(For.INBOUND_MESSAGE_BYTES);
+  }
+
+  public RateLimiter getStoriesLimiter() {
+    return forDescriptor(For.STORIES);
+  }
+
+  public RateLimiter getWaitForLinkedDeviceLimiter() {
+    return forDescriptor(For.WAIT_FOR_LINKED_DEVICE);
+  }
+
+  public RateLimiter getUploadTransferArchiveLimiter() {
+    return forDescriptor(For.UPLOAD_TRANSFER_ARCHIVE);
+  }
+
+  public RateLimiter getWaitForTransferArchiveLimiter() {
+    return forDescriptor(For.WAIT_FOR_TRANSFER_ARCHIVE);
   }
 }

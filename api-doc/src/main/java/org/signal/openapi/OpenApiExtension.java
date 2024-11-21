@@ -13,6 +13,7 @@ import io.swagger.v3.jaxrs2.ResolvedParameter;
 import io.swagger.v3.jaxrs2.ext.AbstractOpenAPIExtension;
 import io.swagger.v3.jaxrs2.ext.OpenAPIExtension;
 import io.swagger.v3.oas.models.Components;
+import jakarta.ws.rs.Consumes;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Type;
 import java.util.Iterator;
@@ -20,9 +21,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.ServiceLoader;
 import java.util.Set;
-import javax.ws.rs.Consumes;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
-import org.whispersystems.textsecuregcm.auth.DisabledPermittedAuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 
 /**
  * One of the extension mechanisms of Swagger Core library (OpenAPI processor) is via custom implementations
@@ -41,10 +40,6 @@ public class OpenApiExtension extends AbstractOpenAPIExtension {
   public static final ResolvedParameter AUTHENTICATED_ACCOUNT = new ResolvedParameter();
 
   public static final ResolvedParameter OPTIONAL_AUTHENTICATED_ACCOUNT = new ResolvedParameter();
-
-  public static final ResolvedParameter DISABLED_PERMITTED_AUTHENTICATED_ACCOUNT = new ResolvedParameter();
-
-  public static final ResolvedParameter OPTIONAL_DISABLED_PERMITTED_AUTHENTICATED_ACCOUNT = new ResolvedParameter();
 
   /**
    * When parsing endpoint methods, Swagger will treat the first parameter not annotated as header/path/query param
@@ -67,20 +62,12 @@ public class OpenApiExtension extends AbstractOpenAPIExtension {
     if (annotations.stream().anyMatch(a -> a.annotationType().equals(Auth.class))) {
       // this is the case of authenticated endpoint,
       if (type instanceof SimpleType simpleType
-          && simpleType.getRawClass().equals(AuthenticatedAccount.class)) {
+          && simpleType.getRawClass().equals(AuthenticatedDevice.class)) {
         return AUTHENTICATED_ACCOUNT;
       }
       if (type instanceof SimpleType simpleType
-          && simpleType.getRawClass().equals(DisabledPermittedAuthenticatedAccount.class)) {
-        return DISABLED_PERMITTED_AUTHENTICATED_ACCOUNT;
-      }
-      if (type instanceof SimpleType simpleType
-          && isOptionalOfType(simpleType, AuthenticatedAccount.class)) {
+          && isOptionalOfType(simpleType, AuthenticatedDevice.class)) {
         return OPTIONAL_AUTHENTICATED_ACCOUNT;
-      }
-      if (type instanceof SimpleType simpleType
-          && isOptionalOfType(simpleType, DisabledPermittedAuthenticatedAccount.class)) {
-        return OPTIONAL_DISABLED_PERMITTED_AUTHENTICATED_ACCOUNT;
       }
     }
 

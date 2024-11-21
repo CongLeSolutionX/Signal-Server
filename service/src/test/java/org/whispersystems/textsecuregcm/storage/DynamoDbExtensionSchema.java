@@ -5,7 +5,11 @@
 
 package org.whispersystems.textsecuregcm.storage;
 
+import java.util.Collections;
 import java.util.List;
+import org.whispersystems.textsecuregcm.backup.BackupsDb;
+import org.whispersystems.textsecuregcm.scheduler.JobScheduler;
+import org.whispersystems.textsecuregcm.experiment.PushNotificationExperimentSamples;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
 import software.amazon.awssdk.services.dynamodb.model.GlobalSecondaryIndex;
 import software.amazon.awssdk.services.dynamodb.model.KeySchemaElement;
@@ -47,6 +51,14 @@ public final class DynamoDbExtensionSchema {
         ),
         List.of()),
 
+    BACKUPS("backups_test",
+        BackupsDb.KEY_BACKUP_ID_HASH,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(BackupsDb.KEY_BACKUP_ID_HASH)
+            .attributeType(ScalarAttributeType.B).build()),
+        Collections.emptyList(), Collections.emptyList()),
+
     CLIENT_RELEASES("client_releases_test",
         ClientReleases.ATTR_PLATFORM,
         ClientReleases.ATTR_VERSION,
@@ -63,36 +75,36 @@ public final class DynamoDbExtensionSchema {
         List.of()),
 
     DELETED_ACCOUNTS("deleted_accounts_test",
-        DeletedAccounts.KEY_ACCOUNT_E164,
+        Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_E164,
         null,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(DeletedAccounts.KEY_ACCOUNT_E164)
+                .attributeName(Accounts.DELETED_ACCOUNTS_KEY_ACCOUNT_E164)
                 .attributeType(ScalarAttributeType.S).build(),
             AttributeDefinition.builder()
-                .attributeName(DeletedAccounts.ATTR_ACCOUNT_UUID)
+                .attributeName(Accounts.DELETED_ACCOUNTS_ATTR_ACCOUNT_UUID)
                 .attributeType(ScalarAttributeType.B)
                 .build()),
         List.of(
             GlobalSecondaryIndex.builder()
-                .indexName(DeletedAccounts.UUID_TO_E164_INDEX_NAME)
+                .indexName(Accounts.DELETED_ACCOUNTS_UUID_TO_E164_INDEX_NAME)
                 .keySchema(
-                    KeySchemaElement.builder().attributeName(DeletedAccounts.ATTR_ACCOUNT_UUID).keyType(KeyType.HASH).build()
+                    KeySchemaElement.builder().attributeName(Accounts.DELETED_ACCOUNTS_ATTR_ACCOUNT_UUID).keyType(KeyType.HASH).build()
                 )
                 .projection(Projection.builder().projectionType(ProjectionType.KEYS_ONLY).build())
                 .provisionedThroughput(ProvisionedThroughput.builder().readCapacityUnits(10L).writeCapacityUnits(10L).build())
                 .build()),
         List.of()
     ),
-  
+
     DELETED_ACCOUNTS_LOCK("deleted_accounts_lock_test",
-        DeletedAccounts.KEY_ACCOUNT_E164,
+        AccountLockManager.KEY_ACCOUNT_E164,
         null,
         List.of(AttributeDefinition.builder()
-            .attributeName(DeletedAccounts.KEY_ACCOUNT_E164)
+            .attributeName(AccountLockManager.KEY_ACCOUNT_E164)
             .attributeType(ScalarAttributeType.S).build()),
         List.of(), List.of()),
-    
+
     NUMBERS("numbers_test",
         Accounts.ATTR_ACCOUNT_E164,
         null,
@@ -126,6 +138,20 @@ public final class DynamoDbExtensionSchema {
                 .build(),
             AttributeDefinition.builder()
                 .attributeName(SingleUsePreKeyStore.KEY_DEVICE_ID_KEY_ID)
+                .attributeType(ScalarAttributeType.B)
+                .build()),
+        List.of(), List.of()),
+
+    PUSH_NOTIFICATION_EXPERIMENT_SAMPLES("push_notification_experiment_samples_test",
+        PushNotificationExperimentSamples.KEY_EXPERIMENT_NAME,
+        PushNotificationExperimentSamples.ATTR_ACI_AND_DEVICE_ID,
+        List.of(
+            AttributeDefinition.builder()
+                .attributeName(PushNotificationExperimentSamples.KEY_EXPERIMENT_NAME)
+                .attributeType(ScalarAttributeType.S)
+                .build(),
+            AttributeDefinition.builder()
+                .attributeName(PushNotificationExperimentSamples.ATTR_ACI_AND_DEVICE_ID)
                 .attributeType(ScalarAttributeType.B)
                 .build()),
         List.of(), List.of()),
@@ -220,6 +246,15 @@ public final class DynamoDbExtensionSchema {
             .projection(Projection.builder().projectionType(ProjectionType.KEYS_ONLY).build())
             .build())),
 
+    ONETIME_DONATIONS("onetime_donations_test",
+        OneTimeDonationsManager.KEY_PAYMENT_ID,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(OneTimeDonationsManager.KEY_PAYMENT_ID)
+            .attributeType(ScalarAttributeType.S)
+            .build()),
+        List.of(), List.of()),
+
     PROFILES("profiles_test",
         Profiles.KEY_ACCOUNT_UUID,
         Profiles.ATTR_VERSION,
@@ -233,7 +268,7 @@ public final class DynamoDbExtensionSchema {
                 .attributeType(ScalarAttributeType.S)
                 .build()),
         List.of(), List.of()),
-        
+
     PUSH_CHALLENGES("push_challenge_test",
         PushChallengeDynamoDb.KEY_ACCOUNT_UUID,
         null,
@@ -251,7 +286,7 @@ public final class DynamoDbExtensionSchema {
             .attributeType(ScalarAttributeType.B)
             .build()),
         List.of(), List.of()),
-  
+
     REGISTRATION_RECOVERY_PASSWORDS("registration_recovery_passwords_test",
         RegistrationRecoveryPasswords.KEY_E164,
         null,
@@ -279,22 +314,37 @@ public final class DynamoDbExtensionSchema {
             .build()),
         List.of(), List.of()),
 
+    SCHEDULED_JOBS("scheduled_jobs_test",
+        JobScheduler.KEY_SCHEDULER_NAME,
+        JobScheduler.ATTR_RUN_AT,
+        List.of(AttributeDefinition.builder()
+                .attributeName(JobScheduler.KEY_SCHEDULER_NAME)
+                .attributeType(ScalarAttributeType.S)
+                .build(),
+
+            AttributeDefinition.builder()
+                .attributeName(JobScheduler.ATTR_RUN_AT)
+                .attributeType(ScalarAttributeType.B)
+                .build()),
+        List.of(),
+        List.of()),
+
     SUBSCRIPTIONS("subscriptions_test",
-        SubscriptionManager.KEY_USER,
+        Subscriptions.KEY_USER,
         null,
         List.of(
             AttributeDefinition.builder()
-                .attributeName(SubscriptionManager.KEY_USER)
+                .attributeName(Subscriptions.KEY_USER)
                 .attributeType(ScalarAttributeType.B)
                 .build(),
             AttributeDefinition.builder()
-                .attributeName(SubscriptionManager.KEY_PROCESSOR_ID_CUSTOMER_ID)
+                .attributeName(Subscriptions.KEY_PROCESSOR_ID_CUSTOMER_ID)
                 .attributeType(ScalarAttributeType.B)
                 .build()),
         List.of(GlobalSecondaryIndex.builder()
-            .indexName(SubscriptionManager.INDEX_NAME)
+            .indexName(Subscriptions.INDEX_NAME)
             .keySchema(KeySchemaElement.builder()
-                .attributeName(SubscriptionManager.KEY_PROCESSOR_ID_CUSTOMER_ID)
+                .attributeName(Subscriptions.KEY_PROCESSOR_ID_CUSTOMER_ID)
                 .keyType(KeyType.HASH)
                 .build())
             .projection(Projection.builder()
@@ -305,6 +355,31 @@ public final class DynamoDbExtensionSchema {
                 .writeCapacityUnits(20L)
                 .build())
             .build()),
+        List.of()),
+
+    CLIENT_PUBLIC_KEYS("client_public_keys_test",
+        ClientPublicKeys.KEY_ACCOUNT_UUID,
+        ClientPublicKeys.KEY_DEVICE_ID,
+        List.of(
+            AttributeDefinition.builder()
+                .attributeName(ClientPublicKeys.KEY_ACCOUNT_UUID)
+                .attributeType(ScalarAttributeType.B)
+                .build(),
+            AttributeDefinition.builder()
+                .attributeName(ClientPublicKeys.KEY_DEVICE_ID)
+                .attributeType(ScalarAttributeType.N)
+                .build()),
+        List.of(),
+        List.of()),
+
+    USED_LINK_DEVICE_TOKENS("used_link_device_tokens_test",
+        Accounts.KEY_LINK_DEVICE_TOKEN_HASH,
+        null,
+        List.of(AttributeDefinition.builder()
+            .attributeName(Accounts.KEY_LINK_DEVICE_TOKEN_HASH)
+            .attributeType(ScalarAttributeType.B)
+            .build()),
+        List.of(),
         List.of()),
 
     USERNAMES("usernames_test",

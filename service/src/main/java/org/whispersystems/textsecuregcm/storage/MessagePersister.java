@@ -5,15 +5,14 @@
 
 package org.whispersystems.textsecuregcm.storage;
 
-import static com.codahale.metrics.MetricRegistry.name;
+import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
-import com.codahale.metrics.Histogram;
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.SharedMetricRegistries;
-import com.codahale.metrics.Timer;
 import com.google.common.annotations.VisibleForTesting;
 import io.dropwizard.lifecycle.Managed;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -23,8 +22,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
-import org.whispersystems.textsecuregcm.util.Constants;
 import org.whispersystems.textsecuregcm.util.Util;
+import software.amazon.awssdk.services.dynamodb.model.ItemCollectionSizeLimitExceededException;
 
 public class MessagePersister implements Managed {
 
@@ -34,17 +33,24 @@ public class MessagePersister implements Managed {
 
   private final Duration persistDelay;
 
-  private final boolean dedicatedProcess;
   private final Thread[] workerThreads;
   private volatile boolean running;
 
-  private final MetricRegistry metricRegistry = SharedMetricRegistries.getOrCreate(Constants.METRICS_NAME);
-  private final Timer getQueuesTimer = metricRegistry.timer(name(MessagePersister.class, "getQueues"));
-  private final Timer persistQueueTimer = metricRegistry.timer(name(MessagePersister.class, "persistQueue"));
-  private final Meter persistQueueExceptionMeter = metricRegistry.meter(
+  private final Timer getQueuesTimer = Metrics.timer(name(MessagePersister.class, "getQueues"));
+  private final Timer persistQueueTimer = Metrics.timer(name(MessagePersister.class, "persistQueue"));
+  private final Counter persistQueueExceptionMeter = Metrics.counter(
       name(MessagePersister.class, "persistQueueException"));
-  private final Histogram queueCountHistogram = metricRegistry.histogram(name(MessagePersister.class, "queueCount"));
-  private final Histogram queueSizeHistogram = metricRegistry.histogram(name(MessagePersister.class, "queueSize"));
+  private final Counter oversizedQueueCounter = Metrics.counter(name(MessagePersister.class, "persistQueueOversized"));
+  private final DistributionSummary queueCountDistributionSummery = DistributionSummary.builder(
+          name(MessagePersister.class, "queueCount"))
+      .publishPercentiles(0.5, 0.75, 0.95, 0.99, 0.999)
+      .distributionStatisticExpiry(Duration.ofMinutes(10))
+      .register(Metrics.globalRegistry);
+  private final DistributionSummary queueSizeDistributionSummery = DistributionSummary.builder(
+          name(MessagePersister.class, "queueSize"))
+      .publishPercentiles(0.5, 0.75, 0.95, 0.99, 0.999)
+      .distributionStatisticExpiry(Duration.ofMinutes(10))
+      .register(Metrics.globalRegistry);
 
   static final int QUEUE_BATCH_LIMIT = 100;
   static final int MESSAGE_BATCH_LIMIT = 100;
@@ -55,17 +61,19 @@ public class MessagePersister implements Managed {
 
   private static final Logger logger = LoggerFactory.getLogger(MessagePersister.class);
 
-  public MessagePersister(final MessagesCache messagesCache, final MessagesManager messagesManager,
+  public MessagePersister(final MessagesCache messagesCache,
+      final MessagesManager messagesManager,
       final AccountsManager accountsManager,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager,
       final Duration persistDelay,
-      final int dedicatedProcessWorkerThreadCount) {
+      final int dedicatedProcessWorkerThreadCount
+  ) {
+
     this.messagesCache = messagesCache;
     this.messagesManager = messagesManager;
     this.accountsManager = accountsManager;
     this.persistDelay = persistDelay;
     this.workerThreads = new Thread[dedicatedProcessWorkerThreadCount];
-    this.dedicatedProcess = true;
 
     for (int i = 0; i < workerThreads.length; i++) {
       workerThreads[i] = new Thread(() -> {
@@ -74,7 +82,7 @@ public class MessagePersister implements Managed {
               .isPersistenceEnabled()) {
             try {
               final int queuesPersisted = persistNextQueues(Instant.now());
-              queueCountHistogram.update(queuesPersisted);
+              queueCountDistributionSummery.record(queuesPersisted);
 
               if (queuesPersisted == 0) {
                 Util.sleep(100);
@@ -126,18 +134,27 @@ public class MessagePersister implements Managed {
     int queuesPersisted = 0;
 
     do {
-      try (final Timer.Context ignored = getQueuesTimer.time()) {
-        queuesToPersist = messagesCache.getQueuesToPersist(slot, currentTime.minus(persistDelay), QUEUE_BATCH_LIMIT);
-      }
+      queuesToPersist = getQueuesTimer.record(
+          () -> messagesCache.getQueuesToPersist(slot, currentTime.minus(persistDelay), QUEUE_BATCH_LIMIT));
 
       for (final String queue : queuesToPersist) {
         final UUID accountUuid = MessagesCache.getAccountUuidFromQueueName(queue);
-        final long deviceId = MessagesCache.getDeviceIdFromQueueName(queue);
+        final byte deviceId = MessagesCache.getDeviceIdFromQueueName(queue);
 
+        final Optional<Account> maybeAccount = accountsManager.getByAccountIdentifier(accountUuid);
+        if (maybeAccount.isEmpty()) {
+          logger.error("No account record found for account {}", accountUuid);
+          continue;
+        }
+        final Optional<Device> maybeDevice = maybeAccount.flatMap(account -> account.getDevice(deviceId));
+        if (maybeDevice.isEmpty()) {
+          logger.error("Account {} does not have a device with id {}", accountUuid, deviceId);
+          continue;
+        }
         try {
-          persistQueue(accountUuid, deviceId);
+          persistQueue(maybeAccount.get(), maybeDevice.get());
         } catch (final Exception e) {
-          persistQueueExceptionMeter.mark();
+          persistQueueExceptionMeter.increment();
           logger.warn("Failed to persist queue {}::{}; will schedule for retry", accountUuid, deviceId, e);
 
           messagesCache.addQueueToPersist(accountUuid, deviceId);
@@ -153,45 +170,56 @@ public class MessagePersister implements Managed {
   }
 
   @VisibleForTesting
-  void persistQueue(final UUID accountUuid, final long deviceId) throws MessagePersistenceException {
-    final Optional<Account> maybeAccount = accountsManager.getByAccountIdentifier(accountUuid);
+  void persistQueue(final Account account, final Device device) throws MessagePersistenceException {
+    final UUID accountUuid = account.getUuid();
+    final byte deviceId = device.getId();
 
-    if (maybeAccount.isEmpty()) {
-      logger.error("No account record found for account {}", accountUuid);
-      return;
+    final Timer.Sample sample = Timer.start();
+
+    messagesCache.lockQueueForPersistence(accountUuid, deviceId);
+
+    try {
+      int messageCount = 0;
+      List<MessageProtos.Envelope> messages;
+
+      int consecutiveEmptyCacheRemovals = 0;
+
+      do {
+        messages = messagesCache.getMessagesToPersist(accountUuid, deviceId, MESSAGE_BATCH_LIMIT);
+
+        int messagesRemovedFromCache = messagesManager.persistMessages(accountUuid, device, messages);
+        messageCount += messages.size();
+
+        if (messagesRemovedFromCache == 0) {
+          consecutiveEmptyCacheRemovals += 1;
+        } else {
+          consecutiveEmptyCacheRemovals = 0;
+        }
+
+        if (consecutiveEmptyCacheRemovals > CONSECUTIVE_EMPTY_CACHE_REMOVAL_LIMIT) {
+          throw new MessagePersistenceException("persistence failure loop detected");
+        }
+
+      } while (!messages.isEmpty());
+
+      queueSizeDistributionSummery.record(messageCount);
+    } catch (ItemCollectionSizeLimitExceededException e) {
+      oversizedQueueCounter.increment();
+      maybeUnlink(account, deviceId); // may throw, in which case we'll retry later by the usual mechanism
+    } finally {
+      messagesCache.unlockQueueForPersistence(accountUuid, deviceId);
+      sample.stop(persistQueueTimer);
     }
 
-    try (final Timer.Context ignored = persistQueueTimer.time()) {
-      messagesCache.lockQueueForPersistence(accountUuid, deviceId);
+  }
 
-      try {
-        int messageCount = 0;
-        List<MessageProtos.Envelope> messages;
-
-        int consecutiveEmptyCacheRemovals = 0;
-
-        do {
-          messages = messagesCache.getMessagesToPersist(accountUuid, deviceId, MESSAGE_BATCH_LIMIT);
-
-          int messagesRemovedFromCache = messagesManager.persistMessages(accountUuid, deviceId, messages);
-          messageCount += messages.size();
-
-          if (messagesRemovedFromCache == 0) {
-            consecutiveEmptyCacheRemovals += 1;
-          } else {
-            consecutiveEmptyCacheRemovals = 0;
-          }
-
-          if (consecutiveEmptyCacheRemovals > CONSECUTIVE_EMPTY_CACHE_REMOVAL_LIMIT) {
-            throw new MessagePersistenceException("persistence failure loop detected");
-          }
-
-        } while (!messages.isEmpty());
-
-        queueSizeHistogram.update(messageCount);
-      } finally {
-        messagesCache.unlockQueueForPersistence(accountUuid, deviceId);
-      }
+  @VisibleForTesting
+  void maybeUnlink(final Account account, byte destinationDeviceId) throws MessagePersistenceException {
+    if (destinationDeviceId == Device.PRIMARY_ID) {
+      throw new MessagePersistenceException("primary device has a full queue");
     }
+
+    logger.warn("Failed to persist queue {}::{} due to overfull queue; will unlink device", account.getUuid(), destinationDeviceId);
+    accountsManager.removeDevice(account, destinationDeviceId).join();
   }
 }

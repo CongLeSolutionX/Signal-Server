@@ -4,12 +4,11 @@
  */
 package org.whispersystems.textsecuregcm.storage;
 
-import static com.codahale.metrics.MetricRegistry.name;
+import static org.whispersystems.textsecuregcm.metrics.MetricsUtil.name;
 
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.SharedMetricRegistries;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Metrics;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -21,11 +20,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.reactivestreams.Publisher;
+import org.signal.libsignal.protocol.SealedSenderMultiRecipientMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.whispersystems.textsecuregcm.entities.MessageProtos;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
-import org.whispersystems.textsecuregcm.util.Constants;
 import org.whispersystems.textsecuregcm.util.Pair;
 import reactor.core.observability.micrometer.Micrometer;
 import reactor.core.publisher.Flux;
@@ -34,15 +34,15 @@ import reactor.core.publisher.Mono;
 public class MessagesManager {
 
   private static final int RESULT_SET_CHUNK_SIZE = 100;
-  final String GET_MESSAGES_FOR_DEVICE_FLUX_NAME = MetricsUtil.name(MessagesManager.class, "getMessagesForDevice");
+  final String GET_MESSAGES_FOR_DEVICE_FLUX_NAME = name(MessagesManager.class, "getMessagesForDevice");
 
   private static final Logger logger = LoggerFactory.getLogger(MessagesManager.class);
 
-  private static final MetricRegistry metricRegistry = SharedMetricRegistries.getOrCreate(Constants.METRICS_NAME);
-  private static final Meter cacheHitByGuidMeter = metricRegistry.meter(name(MessagesManager.class, "cacheHitByGuid"));
-  private static final Meter cacheMissByGuidMeter = metricRegistry.meter(
-      name(MessagesManager.class, "cacheMissByGuid"));
-  private static final Meter persistMessageMeter = metricRegistry.meter(name(MessagesManager.class, "persistMessage"));
+  private static final Counter PERSIST_MESSAGE_COUNTER = Metrics.counter(
+      name(MessagesManager.class, "persistMessage"));
+
+  private static final String MAY_HAVE_MESSAGES_COUNTER_NAME =
+      MetricsUtil.name(MessagesManager.class, "mayHaveMessages");
 
   private final MessagesDynamoDb messagesDynamoDb;
   private final MessagesCache messagesCache;
@@ -60,21 +60,62 @@ public class MessagesManager {
     this.messageDeletionExecutor = messageDeletionExecutor;
   }
 
-  public void insert(UUID destinationUuid, long destinationDevice, Envelope message) {
+  /**
+   * Inserts a message into a target device's message queue and notifies registered listeners that a new message is
+   * available.
+   *
+   * @param destinationUuid the account identifier for the destination queue
+   * @param destinationDeviceId the device ID for the destination queue
+   * @param message the message to insert into the queue
+   *
+   * @return {@code true} if the destination device is "present" (i.e. has an active event listener) or {@code false}
+   * otherwise
+   *
+   * @see org.whispersystems.textsecuregcm.push.WebSocketConnectionEventManager
+   */
+  public boolean insert(final UUID destinationUuid, final byte destinationDeviceId, final Envelope message) {
     final UUID messageGuid = UUID.randomUUID();
 
-    messagesCache.insert(messageGuid, destinationUuid, destinationDevice, message);
+    final boolean destinationPresent = messagesCache.insert(messageGuid, destinationUuid, destinationDeviceId, message);
 
-    if (message.hasSourceUuid() && !destinationUuid.toString().equals(message.getSourceUuid())) {
-      reportMessageManager.store(message.getSourceUuid(), messageGuid);
+    if (message.hasSourceServiceId() && !destinationUuid.toString().equals(message.getSourceServiceId())) {
+      reportMessageManager.store(message.getSourceServiceId(), messageGuid);
     }
+
+    return destinationPresent;
   }
 
-  public boolean hasCachedMessages(final UUID destinationUuid, final long destinationDevice) {
-    return messagesCache.hasMessages(destinationUuid, destinationDevice);
+  public CompletableFuture<Boolean> mayHavePersistedMessages(final UUID destinationUuid, final Device destinationDevice) {
+    return messagesDynamoDb.mayHaveMessages(destinationUuid, destinationDevice);
   }
 
-  public Mono<Pair<List<Envelope>, Boolean>> getMessagesForDevice(UUID destinationUuid, long destinationDevice,
+  public CompletableFuture<Boolean> mayHaveMessages(final UUID destinationUuid, final Device destinationDevice) {
+    return messagesCache.hasMessagesAsync(destinationUuid, destinationDevice.getId())
+        .thenCombine(messagesDynamoDb.mayHaveMessages(destinationUuid, destinationDevice),
+            (mayHaveCachedMessages, mayHavePersistedMessages) -> {
+              final String outcome;
+
+              if (mayHaveCachedMessages && mayHavePersistedMessages) {
+                outcome = "both";
+              } else if (mayHaveCachedMessages) {
+                outcome = "cached";
+              } else if (mayHavePersistedMessages) {
+                outcome = "persisted";
+              } else {
+                outcome = "none";
+              }
+
+              Metrics.counter(MAY_HAVE_MESSAGES_COUNTER_NAME, "outcome", outcome).increment();
+
+              return mayHaveCachedMessages || mayHavePersistedMessages;
+            });
+  }
+
+  public CompletableFuture<Boolean> mayHaveUrgentPersistedMessages(final UUID destinationUuid, final Device destinationDevice) {
+    return messagesDynamoDb.mayHaveUrgentMessages(destinationUuid, destinationDevice);
+  }
+
+  public Mono<Pair<List<Envelope>, Boolean>> getMessagesForDevice(UUID destinationUuid, Device destinationDevice,
       boolean cachedMessagesOnly) {
 
     return Flux.from(
@@ -84,18 +125,18 @@ public class MessagesManager {
         .map(envelopes -> new Pair<>(envelopes, envelopes.size() >= RESULT_SET_CHUNK_SIZE));
   }
 
-  public Publisher<Envelope> getMessagesForDeviceReactive(UUID destinationUuid, long destinationDevice,
+  public Publisher<Envelope> getMessagesForDeviceReactive(UUID destinationUuid, Device destinationDevice,
       final boolean cachedMessagesOnly) {
 
     return getMessagesForDevice(destinationUuid, destinationDevice, null, cachedMessagesOnly);
   }
 
-  private Publisher<Envelope> getMessagesForDevice(UUID destinationUuid, long destinationDevice,
+  private Publisher<Envelope> getMessagesForDevice(UUID destinationUuid, Device destinationDevice,
       @Nullable Integer limit, final boolean cachedMessagesOnly) {
 
     final Publisher<Envelope> dynamoPublisher =
         cachedMessagesOnly ? Flux.empty() : messagesDynamoDb.load(destinationUuid, destinationDevice, limit);
-    final Publisher<Envelope> cachePublisher = messagesCache.get(destinationUuid, destinationDevice);
+    final Publisher<Envelope> cachePublisher = messagesCache.get(destinationUuid, destinationDevice.getId());
 
     return Flux.concat(dynamoPublisher, cachePublisher)
         .name(GET_MESSAGES_FOR_DEVICE_FLUX_NAME)
@@ -103,35 +144,32 @@ public class MessagesManager {
   }
 
   public CompletableFuture<Void> clear(UUID destinationUuid) {
-    return CompletableFuture.allOf(
-        messagesCache.clear(destinationUuid),
-        messagesDynamoDb.deleteAllMessagesForAccount(destinationUuid));
+    return messagesCache.clear(destinationUuid);
   }
 
-  public CompletableFuture<Void> clear(UUID destinationUuid, long deviceId) {
-    return CompletableFuture.allOf(
-        messagesCache.clear(destinationUuid, deviceId),
-        messagesDynamoDb.deleteAllMessagesForDevice(destinationUuid, deviceId));
+  public CompletableFuture<Void> clear(UUID destinationUuid, byte deviceId) {
+    return messagesCache.clear(destinationUuid, deviceId);
   }
 
-  public CompletableFuture<Optional<Envelope>> delete(UUID destinationUuid, long destinationDeviceId, UUID guid,
+  public CompletableFuture<Optional<RemovedMessage>> delete(UUID destinationUuid, Device destinationDevice, UUID guid,
       @Nullable Long serverTimestamp) {
-    return messagesCache.remove(destinationUuid, destinationDeviceId, guid)
+    return messagesCache.remove(destinationUuid, destinationDevice.getId(), guid)
         .thenComposeAsync(removed -> {
 
           if (removed.isPresent()) {
-            cacheHitByGuidMeter.mark();
             return CompletableFuture.completedFuture(removed);
           }
 
-          cacheMissByGuidMeter.mark();
-
+          final CompletableFuture<Optional<MessageProtos.Envelope>> maybeDeletedEnvelope;
           if (serverTimestamp == null) {
-            return messagesDynamoDb.deleteMessageByDestinationAndGuid(destinationUuid, guid);
+            maybeDeletedEnvelope = messagesDynamoDb.deleteMessageByDestinationAndGuid(destinationUuid,
+                destinationDevice, guid);
           } else {
-            return messagesDynamoDb.deleteMessage(destinationUuid, destinationDeviceId, guid, serverTimestamp);
+            maybeDeletedEnvelope = messagesDynamoDb.deleteMessage(destinationUuid, destinationDevice, guid,
+                serverTimestamp);
           }
 
+          return maybeDeletedEnvelope.thenApply(maybeEnvelope -> maybeEnvelope.map(RemovedMessage::fromEnvelope));
         }, messageDeletionExecutor);
   }
 
@@ -140,22 +178,22 @@ public class MessagesManager {
    */
   public int persistMessages(
       final UUID destinationUuid,
-      final long destinationDeviceId,
+      final Device destinationDevice,
       final List<Envelope> messages) {
 
     final List<Envelope> nonEphemeralMessages = messages.stream()
         .filter(envelope -> !envelope.getEphemeral())
         .collect(Collectors.toList());
 
-    messagesDynamoDb.store(nonEphemeralMessages, destinationUuid, destinationDeviceId);
+    messagesDynamoDb.store(nonEphemeralMessages, destinationUuid, destinationDevice);
 
     final List<UUID> messageGuids = messages.stream().map(message -> UUID.fromString(message.getServerGuid()))
         .collect(Collectors.toList());
     int messagesRemovedFromCache = 0;
     try {
-      messagesRemovedFromCache = messagesCache.remove(destinationUuid, destinationDeviceId, messageGuids)
+      messagesRemovedFromCache = messagesCache.remove(destinationUuid, destinationDevice.getId(), messageGuids)
           .get(30, TimeUnit.SECONDS).size();
-      persistMessageMeter.mark(nonEphemeralMessages.size());
+      PERSIST_MESSAGE_COUNTER.increment(nonEphemeralMessages.size());
 
     } catch (InterruptedException | ExecutionException | TimeoutException e) {
       logger.warn("Failed to remove messages from cache", e);
@@ -163,15 +201,24 @@ public class MessagesManager {
     return messagesRemovedFromCache;
   }
 
-  public void addMessageAvailabilityListener(
-      final UUID destinationUuid,
-      final long destinationDeviceId,
-      final MessageAvailabilityListener listener) {
-    messagesCache.addMessageAvailabilityListener(destinationUuid, destinationDeviceId, listener);
+  public CompletableFuture<Optional<Instant>> getEarliestUndeliveredTimestampForDevice(UUID destinationUuid, Device destinationDevice) {
+    // If there's any message in the persisted layer, return the oldest
+    return Mono.from(messagesDynamoDb.load(destinationUuid, destinationDevice, 1)).map(Envelope::getServerTimestamp)
+        // If not, return the oldest message in the cache
+        .switchIfEmpty(messagesCache.getEarliestUndeliveredTimestamp(destinationUuid, destinationDevice.getId()))
+        .map(epochMilli -> Optional.of(Instant.ofEpochMilli(epochMilli)))
+        .switchIfEmpty(Mono.just(Optional.empty()))
+        .toFuture();
   }
 
-  public void removeMessageAvailabilityListener(final MessageAvailabilityListener listener) {
-    messagesCache.removeMessageAvailabilityListener(listener);
+  /**
+   * Inserts the shared multi-recipient message payload to storage.
+   *
+   * @return a key where the shared data is stored
+   * @see MessagesCacheInsertSharedMultiRecipientPayloadAndViewsScript
+   */
+  public byte[] insertSharedMultiRecipientMessagePayload(
+      final SealedSenderMultiRecipientMessage sealedSenderMultiRecipientMessage) {
+    return messagesCache.insertSharedMultiRecipientMessagePayload(sealedSenderMultiRecipientMessage);
   }
-
 }

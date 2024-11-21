@@ -98,7 +98,7 @@ public record AccountDataReportResponse(UUID reportId,
 
   }
 
-  public record DeviceDataReport(long id,
+  public record DeviceDataReport(byte id,
                                  @JsonFormat(pattern = DATE_FORMAT, timezone = UTC)
                                  Instant lastSeen,
                                  @JsonFormat(pattern = DATE_FORMAT, timezone = UTC)
@@ -114,7 +114,7 @@ public record AccountDataReportResponse(UUID reportId,
                                 boolean visible) {
 
     public BadgeDataReport(AccountBadge badge) {
-      this(badge.getId(), badge.getExpiration(), badge.isVisible());
+      this(badge.id(), badge.expiration(), badge.visible());
     }
 
   }

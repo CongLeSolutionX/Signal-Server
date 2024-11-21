@@ -7,36 +7,55 @@ package org.whispersystems.textsecuregcm.entities;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import org.whispersystems.textsecuregcm.util.ByteArrayBase64WithPaddingAdapter;
 
+// Note, this class cannot be converted into a record because @JsonUnwrapped does not work with records.
+// https://github.com/FasterXML/jackson-databind/issues/1467
 public class VersionedProfileResponse {
 
   @JsonUnwrapped
   private BaseProfileResponse baseProfileResponse;
 
   @JsonProperty
-  private String name;
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] name;
 
   @JsonProperty
-  private String about;
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] about;
 
   @JsonProperty
-  private String aboutEmoji;
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] aboutEmoji;
 
   @JsonProperty
   private String avatar;
 
   @JsonProperty
-  private String paymentAddress;
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] paymentAddress;
+
+  @JsonProperty
+  @JsonSerialize(using = ByteArrayBase64WithPaddingAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayBase64WithPaddingAdapter.Deserializing.class)
+  private byte[] phoneNumberSharing;
 
   public VersionedProfileResponse() {
   }
 
   public VersionedProfileResponse(final BaseProfileResponse baseProfileResponse,
-      final String name,
-      final String about,
-      final String aboutEmoji,
+      final byte[] name,
+      final byte[] about,
+      final byte[] aboutEmoji,
       final String avatar,
-      final String paymentAddress) {
+      final byte[] paymentAddress,
+      final byte[] phoneNumberSharing) {
 
     this.baseProfileResponse = baseProfileResponse;
     this.name = name;
@@ -44,21 +63,22 @@ public class VersionedProfileResponse {
     this.aboutEmoji = aboutEmoji;
     this.avatar = avatar;
     this.paymentAddress = paymentAddress;
+    this.phoneNumberSharing = phoneNumberSharing;
   }
 
   public BaseProfileResponse getBaseProfileResponse() {
     return baseProfileResponse;
   }
 
-  public String getName() {
+  public byte[] getName() {
     return name;
   }
 
-  public String getAbout() {
+  public byte[] getAbout() {
     return about;
   }
 
-  public String getAboutEmoji() {
+  public byte[] getAboutEmoji() {
     return aboutEmoji;
   }
 
@@ -66,7 +86,11 @@ public class VersionedProfileResponse {
     return avatar;
   }
 
-  public String getPaymentAddress() {
+  public byte[] getPaymentAddress() {
     return paymentAddress;
+  }
+
+  public byte[] getPhoneNumberSharing() {
+    return phoneNumberSharing;
   }
 }

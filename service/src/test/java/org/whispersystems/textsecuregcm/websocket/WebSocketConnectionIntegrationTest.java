@@ -43,21 +43,26 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.stubbing.Answer;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.Envelope;
+import org.whispersystems.textsecuregcm.limits.MessageDeliveryLoopMonitor;
+import org.whispersystems.textsecuregcm.metrics.MessageMetrics;
+import org.whispersystems.textsecuregcm.push.PushNotificationManager;
+import org.whispersystems.textsecuregcm.push.PushNotificationScheduler;
 import org.whispersystems.textsecuregcm.push.ReceiptSender;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.ClientReleaseManager;
 import org.whispersystems.textsecuregcm.storage.Device;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtension;
 import org.whispersystems.textsecuregcm.storage.DynamoDbExtensionSchema.Tables;
 import org.whispersystems.textsecuregcm.storage.MessagesCache;
 import org.whispersystems.textsecuregcm.storage.MessagesDynamoDb;
 import org.whispersystems.textsecuregcm.storage.MessagesManager;
 import org.whispersystems.textsecuregcm.storage.ReportMessageManager;
-import org.whispersystems.textsecuregcm.util.Pair;
 import org.whispersystems.websocket.WebSocketClient;
 import org.whispersystems.websocket.messages.WebSocketResponseMessage;
 import reactor.core.scheduler.Scheduler;
@@ -82,16 +87,19 @@ class WebSocketConnectionIntegrationTest {
   private Scheduler messageDeliveryScheduler;
   private ClientReleaseManager clientReleaseManager;
 
+  private DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
+
   private long serialTimestamp = System.currentTimeMillis();
 
   @BeforeEach
   void setUp() throws Exception {
-
     sharedExecutorService = Executors.newSingleThreadExecutor();
     scheduledExecutorService = Executors.newSingleThreadScheduledExecutor();
     messageDeliveryScheduler = Schedulers.newBoundedElastic(10, 10_000, "messageDelivery");
+    dynamicConfigurationManager = mock(DynamicConfigurationManager.class);
+    when(dynamicConfigurationManager.getConfiguration()).thenReturn(new DynamicConfiguration());
     messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(),
-        REDIS_CLUSTER_EXTENSION.getRedisCluster(), sharedExecutorService, messageDeliveryScheduler, sharedExecutorService, Clock.systemUTC());
+        messageDeliveryScheduler, sharedExecutorService, Clock.systemUTC());
     messagesDynamoDb = new MessagesDynamoDb(DYNAMO_DB_EXTENSION.getDynamoDbClient(),
         DYNAMO_DB_EXTENSION.getDynamoDbAsyncClient(), Tables.MESSAGES.tableName(), Duration.ofDays(7),
         sharedExecutorService);
@@ -103,7 +111,7 @@ class WebSocketConnectionIntegrationTest {
 
     when(account.getNumber()).thenReturn("+18005551234");
     when(account.getUuid()).thenReturn(UUID.randomUUID());
-    when(device.getId()).thenReturn(1L);
+    when(device.getId()).thenReturn(Device.PRIMARY_ID);
   }
 
   @AfterEach
@@ -125,12 +133,15 @@ class WebSocketConnectionIntegrationTest {
     final WebSocketConnection webSocketConnection = new WebSocketConnection(
         mock(ReceiptSender.class),
         new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService),
-        new AuthenticatedAccount(() -> new Pair<>(account, device)),
-        device,
+        new MessageMetrics(),
+        mock(PushNotificationManager.class),
+        mock(PushNotificationScheduler.class),
+        new AuthenticatedDevice(account, device),
         webSocketClient,
         scheduledExecutorService,
         messageDeliveryScheduler,
-        clientReleaseManager);
+        clientReleaseManager,
+        mock(MessageDeliveryLoopMonitor.class));
 
     final List<MessageProtos.Envelope> expectedMessages = new ArrayList<>(persistedMessageCount + cachedMessageCount);
 
@@ -146,7 +157,7 @@ class WebSocketConnectionIntegrationTest {
           expectedMessages.add(envelope);
         }
 
-        messagesDynamoDb.store(persistedMessages, account.getUuid(), device.getId());
+        messagesDynamoDb.store(persistedMessages, account.getUuid(), device);
       }
 
       for (int i = 0; i < cachedMessageCount; i++) {
@@ -210,12 +221,15 @@ class WebSocketConnectionIntegrationTest {
     final WebSocketConnection webSocketConnection = new WebSocketConnection(
         mock(ReceiptSender.class),
         new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService),
-        new AuthenticatedAccount(() -> new Pair<>(account, device)),
-        device,
+        new MessageMetrics(),
+        mock(PushNotificationManager.class),
+        mock(PushNotificationScheduler.class),
+        new AuthenticatedDevice(account, device),
         webSocketClient,
         scheduledExecutorService,
         messageDeliveryScheduler,
-        clientReleaseManager);
+        clientReleaseManager,
+        mock(MessageDeliveryLoopMonitor.class));
 
     final int persistedMessageCount = 207;
     final int cachedMessageCount = 173;
@@ -233,7 +247,7 @@ class WebSocketConnectionIntegrationTest {
           expectedMessages.add(envelope);
         }
 
-        messagesDynamoDb.store(persistedMessages, account.getUuid(), device.getId());
+        messagesDynamoDb.store(persistedMessages, account.getUuid(), device);
       }
 
       for (int i = 0; i < cachedMessageCount; i++) {
@@ -276,13 +290,16 @@ class WebSocketConnectionIntegrationTest {
     final WebSocketConnection webSocketConnection = new WebSocketConnection(
         mock(ReceiptSender.class),
         new MessagesManager(messagesDynamoDb, messagesCache, reportMessageManager, sharedExecutorService),
-        new AuthenticatedAccount(() -> new Pair<>(account, device)),
-        device,
+        new MessageMetrics(),
+        mock(PushNotificationManager.class),
+        mock(PushNotificationScheduler.class),
+        new AuthenticatedDevice(account, device),
         webSocketClient,
         100, // use a very short timeout, so that this test completes quickly
         scheduledExecutorService,
         messageDeliveryScheduler,
-        clientReleaseManager);
+        clientReleaseManager,
+        mock(MessageDeliveryLoopMonitor.class));
 
     final int persistedMessageCount = 207;
     final int cachedMessageCount = 173;
@@ -300,7 +317,7 @@ class WebSocketConnectionIntegrationTest {
           expectedMessages.add(envelope);
         }
 
-        messagesDynamoDb.store(persistedMessages, account.getUuid(), device.getId());
+        messagesDynamoDb.store(persistedMessages, account.getUuid(), device);
       }
 
       for (int i = 0; i < cachedMessageCount; i++) {
@@ -370,12 +387,12 @@ class WebSocketConnectionIntegrationTest {
     final long timestamp = serialTimestamp++;
 
     return MessageProtos.Envelope.newBuilder()
-        .setTimestamp(timestamp)
+        .setClientTimestamp(timestamp)
         .setServerTimestamp(timestamp)
-        .setContent(ByteString.copyFromUtf8(RandomStringUtils.randomAlphanumeric(256)))
+        .setContent(ByteString.copyFromUtf8(RandomStringUtils.secure().nextAlphanumeric(256)))
         .setType(MessageProtos.Envelope.Type.CIPHERTEXT)
         .setServerGuid(messageGuid.toString())
-        .setDestinationUuid(UUID.randomUUID().toString())
+        .setDestinationServiceId(UUID.randomUUID().toString())
         .build();
   }
 

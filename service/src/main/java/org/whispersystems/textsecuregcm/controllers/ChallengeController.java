@@ -18,37 +18,45 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.parameters.RequestBody;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
-import javax.validation.Valid;
-import javax.ws.rs.BadRequestException;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.HeaderParam;
-import javax.ws.rs.POST;
-import javax.ws.rs.PUT;
-import javax.ws.rs.Path;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
+import org.whispersystems.textsecuregcm.entities.AnswerCaptchaChallengeRequest;
 import org.whispersystems.textsecuregcm.entities.AnswerChallengeRequest;
 import org.whispersystems.textsecuregcm.entities.AnswerPushChallengeRequest;
-import org.whispersystems.textsecuregcm.entities.AnswerRecaptchaChallengeRequest;
+import org.whispersystems.textsecuregcm.filters.RemoteAddressFilter;
 import org.whispersystems.textsecuregcm.limits.RateLimitChallengeManager;
 import org.whispersystems.textsecuregcm.metrics.UserAgentTagUtil;
 import org.whispersystems.textsecuregcm.push.NotPushRegisteredException;
-import org.whispersystems.textsecuregcm.util.HeaderUtils;
+import org.whispersystems.textsecuregcm.spam.ChallengeConstraintChecker;
+import org.whispersystems.textsecuregcm.spam.ChallengeConstraintChecker.ChallengeConstraints;
+import org.whispersystems.websocket.auth.ReadOnly;
 
 @Path("/v1/challenge")
 @Tag(name = "Challenge")
 public class ChallengeController {
 
   private final RateLimitChallengeManager rateLimitChallengeManager;
+  private final ChallengeConstraintChecker challengeConstraintChecker;
 
   private static final String CHALLENGE_RESPONSE_COUNTER_NAME = name(ChallengeController.class, "challengeResponse");
   private static final String CHALLENGE_TYPE_TAG = "type";
 
-  public ChallengeController(final RateLimitChallengeManager rateLimitChallengeManager) {
+  public ChallengeController(
+      final RateLimitChallengeManager rateLimitChallengeManager,
+      final ChallengeConstraintChecker challengeConstraintChecker) {
     this.rateLimitChallengeManager = rateLimitChallengeManager;
+    this.challengeConstraintChecker = challengeConstraintChecker;
   }
 
   @PUT
@@ -58,40 +66,45 @@ public class ChallengeController {
       summary = "Submit proof of a challenge completion",
       description = """
           Some server endpoints (the "send message" endpoint, for example) may return a 428 response indicating the client must complete a challenge before continuing.
-          Clients may use this endpoint to provide proof of a completed challenge. If successful, the client may then 
+          Clients may use this endpoint to provide proof of a completed challenge. If successful, the client may then
           continue their original operation.
           """,
       requestBody = @RequestBody(content = {@Content(schema = @Schema(oneOf = {AnswerPushChallengeRequest.class,
-          AnswerRecaptchaChallengeRequest.class}))})
+          AnswerCaptchaChallengeRequest.class}))})
   )
   @ApiResponse(responseCode = "200", description = "Indicates the challenge proof was accepted")
-  @ApiResponse(responseCode = "413", description = "Too many attempts", headers = @Header(
-      name = "Retry-After",
-      description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
+  @ApiResponse(responseCode = "428", description = "Submitted captcha token is invalid")
   @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
       name = "Retry-After",
       description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
-  public Response handleChallengeResponse(@Auth final AuthenticatedAccount auth,
+  public Response handleChallengeResponse(@ReadOnly @Auth final AuthenticatedDevice auth,
       @Valid final AnswerChallengeRequest answerRequest,
-      @HeaderParam(HttpHeaders.X_FORWARDED_FOR) final String forwardedFor,
+      @Context ContainerRequestContext requestContext,
       @HeaderParam(HttpHeaders.USER_AGENT) final String userAgent) throws RateLimitExceededException, IOException {
 
     Tags tags = Tags.of(UserAgentTagUtil.getPlatformTag(userAgent));
 
+    final ChallengeConstraints constraints = challengeConstraintChecker.challengeConstraints(
+        requestContext, auth.getAccount());
     try {
       if (answerRequest instanceof final AnswerPushChallengeRequest pushChallengeRequest) {
         tags = tags.and(CHALLENGE_TYPE_TAG, "push");
 
+        if (!constraints.pushPermitted()) {
+          return Response.status(429).build();
+        }
         rateLimitChallengeManager.answerPushChallenge(auth.getAccount(), pushChallengeRequest.getChallenge());
-      } else if (answerRequest instanceof AnswerRecaptchaChallengeRequest recaptchaChallengeRequest) {
-        tags = tags.and(CHALLENGE_TYPE_TAG, "recaptcha");
+      } else if (answerRequest instanceof AnswerCaptchaChallengeRequest captchaChallengeRequest) {
+        tags = tags.and(CHALLENGE_TYPE_TAG, "captcha");
 
-        final String mostRecentProxy = HeaderUtils.getMostRecentProxy(forwardedFor).orElseThrow(() -> new BadRequestException());
-        boolean success = rateLimitChallengeManager.answerRecaptchaChallenge(
+        final String remoteAddress = (String) requestContext.getProperty(
+            RemoteAddressFilter.REMOTE_ADDRESS_ATTRIBUTE_NAME);
+        boolean success = rateLimitChallengeManager.answerCaptchaChallenge(
             auth.getAccount(),
-            recaptchaChallengeRequest.getCaptcha(),
-            mostRecentProxy,
-            userAgent);
+            captchaChallengeRequest.getCaptcha(),
+            remoteAddress,
+            userAgent,
+            constraints.captchaScoreThreshold());
 
         if (!success) {
           return Response.status(428).build();
@@ -150,7 +163,13 @@ public class ChallengeController {
   @ApiResponse(responseCode = "429", description = "Too many attempts", headers = @Header(
       name = "Retry-After",
       description = "If present, an positive integer indicating the number of seconds before a subsequent attempt could succeed"))
-  public Response requestPushChallenge(@Auth final AuthenticatedAccount auth) {
+  public Response requestPushChallenge(@ReadOnly @Auth final AuthenticatedDevice auth,
+      @Context ContainerRequestContext requestContext) {
+    final ChallengeConstraints constraints = challengeConstraintChecker.challengeConstraints(
+        requestContext, auth.getAccount());
+    if (!constraints.pushPermitted()) {
+      return Response.status(429).build();
+    }
     try {
       rateLimitChallengeManager.sendPushChallenge(auth.getAccount());
       return Response.status(200).build();

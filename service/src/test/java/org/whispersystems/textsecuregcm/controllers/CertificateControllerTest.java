@@ -10,10 +10,10 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.google.common.collect.ImmutableSet;
-import io.dropwizard.auth.PolymorphicAuthValueFactoryProvider;
+import io.dropwizard.auth.AuthValueFactoryProvider;
 import io.dropwizard.testing.junit5.DropwizardExtensionsSupport;
 import io.dropwizard.testing.junit5.ResourceExtension;
+import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
@@ -22,7 +22,6 @@ import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.stream.Stream;
-import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.StringUtils;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.Test;
@@ -39,15 +38,14 @@ import org.signal.libsignal.zkgroup.auth.AuthCredentialWithPniResponse;
 import org.signal.libsignal.zkgroup.auth.ClientZkAuthOperations;
 import org.signal.libsignal.zkgroup.auth.ServerZkAuthOperations;
 import org.signal.libsignal.zkgroup.calllinks.CallLinkAuthCredentialResponse;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.auth.CertificateGenerator;
-import org.whispersystems.textsecuregcm.auth.DisabledPermittedAuthenticatedAccount;
-import org.whispersystems.textsecuregcm.auth.OptionalAccess;
 import org.whispersystems.textsecuregcm.entities.DeliveryCertificate;
 import org.whispersystems.textsecuregcm.entities.GroupCredentials;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.SenderCertificate;
 import org.whispersystems.textsecuregcm.entities.MessageProtos.ServerCertificate;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
+import org.whispersystems.textsecuregcm.util.HeaderUtils;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 
 @ExtendWith(DropwizardExtensionsSupport.class)
@@ -81,8 +79,7 @@ class CertificateControllerTest {
 
   private static final ResourceExtension resources = ResourceExtension.builder()
       .addProvider(AuthHelper.getAuthFilter())
-      .addProvider(new PolymorphicAuthValueFactoryProvider.Binder<>(
-          ImmutableSet.of(AuthenticatedAccount.class, DisabledPermittedAuthenticatedAccount.class)))
+      .addProvider(new AuthValueFactoryProvider.Binder<>(AuthenticatedDevice.class))
       .setMapper(SystemMapper.jsonMapper())
       .setTestContainerFactory(new GrizzlyWebTestContainerFactory())
       .addResource(new CertificateController(certificateGenerator, serverZkAuthOperations, genericServerSecretParams, clock))
@@ -201,31 +198,21 @@ class CertificateControllerTest {
     Response response = resources.getJerseyTest()
         .target("/v1/certificate/delivery")
         .request()
-        .header(OptionalAccess.UNIDENTIFIED, AuthHelper.getUnidentifiedAccessHeader("1234".getBytes()))
+        .header(HeaderUtils.UNIDENTIFIED_ACCESS_KEY, AuthHelper.getUnidentifiedAccessHeader("1234".getBytes()))
         .get();
 
     assertEquals(response.getStatus(), 401);
   }
 
   @Test
-  void testDisabledAuthentication() {
-    Response response = resources.getJerseyTest()
-        .target("/v1/certificate/delivery")
-        .request()
-        .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.DISABLED_UUID, AuthHelper.DISABLED_PASSWORD))
-        .get();
-
-    assertEquals(response.getStatus(), 401);
-  }
-
-  @Test
-  void testGetSingleGroupCredentialWithPniAsAci() {
+  void testGetSingleGroupCredentialWithPniAsServiceId() {
     final Instant startOfDay = clock.instant().truncatedTo(ChronoUnit.DAYS);
 
     final GroupCredentials credentials = resources.getJerseyTest()
         .target("/v1/certificate/auth/group")
         .queryParam("redemptionStartSeconds", startOfDay.getEpochSecond())
         .queryParam("redemptionEndSeconds", startOfDay.getEpochSecond())
+        .queryParam("pniAsServiceId", true)
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
         .get(GroupCredentials.class);
@@ -241,7 +228,7 @@ class CertificateControllerTest {
         new ClientZkAuthOperations(serverSecretParams.getPublicParams());
 
     assertDoesNotThrow(() -> {
-      clientZkAuthOperations.receiveAuthCredentialWithPniAsAci(
+      clientZkAuthOperations.receiveAuthCredentialWithPniAsServiceId(
           new ServiceId.Aci(AuthHelper.VALID_UUID),
           new ServiceId.Pni(AuthHelper.VALID_PNI),
           (int) startOfDay.getEpochSecond(),
@@ -255,14 +242,14 @@ class CertificateControllerTest {
   }
 
   @Test
-  void testGetSingleGroupCredentialWithPniAsServiceId() {
+  void testGetSingleGroupCredentialZkc() {
     final Instant startOfDay = clock.instant().truncatedTo(ChronoUnit.DAYS);
 
     final GroupCredentials credentials = resources.getJerseyTest()
         .target("/v1/certificate/auth/group")
         .queryParam("redemptionStartSeconds", startOfDay.getEpochSecond())
         .queryParam("redemptionEndSeconds", startOfDay.getEpochSecond())
-        .queryParam("pniAsServiceId", true)
+        .queryParam("zkcCredential", true)
         .request()
         .header("Authorization", AuthHelper.getAuthHeader(AuthHelper.VALID_UUID, AuthHelper.VALID_PASSWORD))
         .get(GroupCredentials.class);

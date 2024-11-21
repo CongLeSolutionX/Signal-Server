@@ -17,37 +17,34 @@ import static org.mockito.Mockito.when;
 import com.google.common.net.HttpHeaders;
 import com.google.protobuf.ByteString;
 import com.vdurmont.semver4j.Semver;
+import io.grpc.ManagedChannel;
+import io.grpc.Server;
+import io.grpc.StatusRuntimeException;
+import io.grpc.inprocess.InProcessChannelBuilder;
+import io.grpc.inprocess.InProcessServerBuilder;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.EnumMap;
 import java.util.Set;
 import java.util.stream.Stream;
-
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.signal.chat.rpc.EchoServiceGrpc;
 import org.signal.chat.rpc.EchoRequest;
+import org.signal.chat.rpc.EchoServiceGrpc;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicRemoteDeprecationConfiguration;
 import org.whispersystems.textsecuregcm.grpc.EchoServiceImpl;
+import org.whispersystems.textsecuregcm.grpc.MockRequestAttributesInterceptor;
 import org.whispersystems.textsecuregcm.grpc.StatusConstants;
-import org.whispersystems.textsecuregcm.grpc.UserAgentInterceptor;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
-
-import io.grpc.Metadata;
-import io.grpc.ManagedChannel;
-import io.grpc.Server;
-import io.grpc.ServerBuilder;
-import io.grpc.StatusRuntimeException;
-import io.grpc.inprocess.InProcessServerBuilder;
-import io.grpc.inprocess.InProcessChannelBuilder;
-import io.grpc.stub.MetadataUtils;
+import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
+import org.whispersystems.textsecuregcm.util.ua.UserAgentUtil;
 
 class RemoteDeprecationFilterTest {
 
@@ -107,7 +104,7 @@ class RemoteDeprecationFilterTest {
 
     return new RemoteDeprecationFilter(dynamicConfigurationManager);
   }
-  
+
   @ParameterizedTest
   @MethodSource
   void testFilter(final String userAgent, final boolean expectDeprecation) throws IOException, ServletException {
@@ -131,17 +128,25 @@ class RemoteDeprecationFilterTest {
 
   @ParameterizedTest
   @MethodSource(value="testFilter")
-  void testGrpcFilter(final String userAgent, final boolean expectDeprecation) throws Exception {
+  void testGrpcFilter(final String userAgentString, final boolean expectDeprecation) throws IOException, InterruptedException {
+    final MockRequestAttributesInterceptor mockRequestAttributesInterceptor = new MockRequestAttributesInterceptor();
+
+    try {
+      mockRequestAttributesInterceptor.setUserAgent(UserAgentUtil.parseUserAgentString(userAgentString));
+    } catch (UnrecognizedUserAgentException ignored) {
+    }
+
     final Server testServer = InProcessServerBuilder.forName("RemoteDeprecationFilterTest")
         .directExecutor()
         .addService(new EchoServiceImpl())
         .intercept(filterConfiguredForTest())
-        .intercept(new UserAgentInterceptor())
+        .intercept(mockRequestAttributesInterceptor)
         .build()
         .start();
+
     final ManagedChannel channel = InProcessChannelBuilder.forName("RemoteDeprecationFilterTest")
         .directExecutor()
-        .userAgent(userAgent)
+        .userAgent(userAgentString)
         .build();
 
     try {
@@ -175,5 +180,5 @@ class RemoteDeprecationFilterTest {
         Arguments.of("Signal-Desktop/8.0.0-beta.1", false),
         Arguments.of("Signal-iOS/8.0.0-beta.2", false));
   }
-  
+
 }

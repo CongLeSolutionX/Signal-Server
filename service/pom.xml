@@ -10,18 +10,35 @@
   <modelVersion>4.0.0</modelVersion>
   <artifactId>service</artifactId>
 
+  <properties>
+    <firebase-admin.version>9.4.1</firebase-admin.version>
+    <java-uuid-generator.version>5.1.0</java-uuid-generator.version>
+    <google-androidpublisher.version>v3-rev20241016-2.0.0</google-androidpublisher.version>
+    <storekit.version>3.2.0</storekit.version>
+  </properties>
+
   <dependencies>
     <dependency>
-      <groupId>io.swagger.core.v3</groupId>
-      <artifactId>swagger-jaxrs2</artifactId>
-      <version>2.2.8</version>
+      <groupId>com.google.apis</groupId>
+      <artifactId>google-api-services-androidpublisher</artifactId>
+      <version>${google-androidpublisher.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.apple.itunes.storekit</groupId>
+      <artifactId>app-store-server-library</artifactId>
+      <version>${storekit.version}</version>
       <exclusions>
-        <!-- org.yaml:snakeyaml is causing a dependency convergence error -->
+        <!-- conflicts with okio-jvm from apollo-api-jvm -->
         <exclusion>
-          <groupId>org.yaml</groupId>
-          <artifactId>snakeyaml</artifactId>
+          <groupId>com.squareup.okio</groupId>
+          <artifactId>okio-jvm</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>io.swagger.core.v3</groupId>
+      <artifactId>swagger-jaxrs2-jakarta</artifactId>
+      <version>${swagger.version}</version>
     </dependency>
     <dependency>
       <groupId>jakarta.servlet</groupId>
@@ -38,17 +55,17 @@
 
     <dependency>
       <groupId>org.whispersystems.textsecure</groupId>
-      <artifactId>event-logger</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.whispersystems.textsecure</groupId>
       <artifactId>websocket-resources</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
       <groupId>org.signal</groupId>
       <artifactId>libsignal-server</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.signal.forks</groupId>
+      <artifactId>noise-java</artifactId>
     </dependency>
 
     <dependency>
@@ -65,7 +82,7 @@
     </dependency>
     <dependency>
       <groupId>io.dropwizard</groupId>
-      <artifactId>dropwizard-db</artifactId>
+      <artifactId>dropwizard-http2</artifactId>
     </dependency>
     <dependency>
       <groupId>io.dropwizard</groupId>
@@ -159,12 +176,6 @@
       <groupId>io.dropwizard</groupId>
       <artifactId>dropwizard-testing</artifactId>
       <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <groupId>junit</groupId>
-          <artifactId>junit</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
 
     <dependency>
@@ -189,11 +200,16 @@
 
     <dependency>
       <groupId>org.eclipse.jetty.websocket</groupId>
-      <artifactId>websocket-api</artifactId>
+      <artifactId>websocket-jetty-api</artifactId>
     </dependency>
     <dependency>
       <groupId>org.eclipse.jetty</groupId>
       <artifactId>jetty-servlets</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.eclipse.jetty.websocket</groupId>
+      <artifactId>websocket-jetty-client</artifactId>
+      <scope>test</scope>
     </dependency>
 
     <dependency>
@@ -204,11 +220,44 @@
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-csv</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-compress</artifactId>
+      <version>1.26.0</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.maxmind.geoip2</groupId>
+      <artifactId>geoip2</artifactId>
+      <version>4.2.0</version>
+    </dependency>
+
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-pubsub</artifactId>
+    </dependency>
 
     <dependency>
       <groupId>com.google.firebase</groupId>
       <artifactId>firebase-admin</artifactId>
-      <version>9.1.1</version>
+      <version>${firebase-admin.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry.semconv</groupId>
+      <artifactId>opentelemetry-semconv</artifactId>
+      <version>1.25.0-alpha</version>
+    </dependency>
+    <!-- resolve opentelemetry-semconv conflict from lower in firebase-admin dependency tree -->
+    <dependency>
+      <groupId>com.google.cloud</groupId>
+      <artifactId>google-cloud-firestore</artifactId>
+      <version>3.28.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>io.opentelemetry.semconv</groupId>
+          <artifactId>opentelemetry-semconv</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
     <dependency>
@@ -231,8 +280,7 @@
 
     <dependency>
       <groupId>io.grpc</groupId>
-      <artifactId>grpc-netty-shaded</artifactId>
-      <scope>runtime</scope>
+      <artifactId>grpc-netty</artifactId>
     </dependency>
     <dependency>
       <groupId>io.grpc</groupId>
@@ -255,7 +303,7 @@
     </dependency>
     <dependency>
       <groupId>io.micrometer</groupId>
-      <artifactId>micrometer-registry-datadog</artifactId>
+      <artifactId>micrometer-registry-statsd</artifactId>
     </dependency>
     <dependency>
       <groupId>org.coursera</groupId>
@@ -293,6 +341,14 @@
 
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
+      <artifactId>apache-client</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>netty-nio-client</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
       <artifactId>sts</artifactId>
     </dependency>
     <dependency>
@@ -304,23 +360,9 @@
       <artifactId>dynamodb</artifactId>
     </dependency>
     <dependency>
-      <groupId>software.amazon.awssdk</groupId>
-      <artifactId>appconfig</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>software.amazon.awssdk</groupId>
-      <artifactId>appconfigdata</artifactId>
-    </dependency>
-    <dependency>
       <groupId>com.amazonaws</groupId>
       <artifactId>dynamodb-lock-client</artifactId>
       <version>1.2.0</version>
-      <exclusions>
-        <exclusion>
-          <groupId>commons-logging</groupId>
-          <artifactId>commons-logging</artifactId>
-        </exclusion>
-      </exclusions>
     </dependency>
 
     <dependency>
@@ -357,9 +399,22 @@
       <artifactId>libphonenumber</artifactId>
     </dependency>
 
+    <!-- Provides tools for mapping phone numbers to time zones, which is helpful for scheduling push notifications
+    during waking hours -->
+    <dependency>
+      <groupId>com.googlecode.libphonenumber</groupId>
+      <artifactId>geocoder</artifactId>
+      <version>2.234</version>
+    </dependency>
+
     <dependency>
       <groupId>net.sourceforge.argparse4j</groupId>
       <artifactId>argparse4j</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-haproxy</artifactId>
     </dependency>
 
     <dependency>
@@ -377,23 +432,6 @@
       <groupId>org.glassfish.jersey.test-framework.providers</groupId>
       <artifactId>jersey-test-framework-provider-grizzly2</artifactId>
       <scope>test</scope>
-      <exclusions>
-        <exclusion>
-          <groupId>javax.servlet</groupId>
-          <artifactId>javax.servlet-api</artifactId>
-        </exclusion>
-        <exclusion>
-          <groupId>junit</groupId>
-          <artifactId>junit</artifactId>
-        </exclusion>
-      </exclusions>
-    </dependency>
-
-    <dependency>
-      <groupId>com.almworks.sqlite4java</groupId>
-      <artifactId>sqlite4java</artifactId>
-      <version>1.0.392</version>
-      <scope>test</scope>
     </dependency>
 
     <dependency>
@@ -403,10 +441,6 @@
     <dependency>
       <groupId>io.projectreactor</groupId>
       <artifactId>reactor-core-micrometer</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.vavr</groupId>
-      <artifactId>vavr</artifactId>
     </dependency>
 
     <dependency>
@@ -429,32 +463,19 @@
     <dependency>
       <groupId>com.fasterxml.uuid</groupId>
       <artifactId>java-uuid-generator</artifactId>
-      <version>4.0.1</version>
+      <version>${java-uuid-generator.version}</version>
       <scope>test</scope>
     </dependency>
 
     <dependency>
       <groupId>com.amazonaws</groupId>
       <artifactId>DynamoDBLocal</artifactId>
-      <version>1.23.0</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.github.ganadist.sqlite4java</groupId>
-      <artifactId>libsqlite4java-osx-aarch64</artifactId>
-      <version>1.0.392</version>
-      <type>dylib</type>
       <scope>test</scope>
     </dependency>
 
     <dependency>
       <groupId>com.google.auth</groupId>
       <artifactId>google-auth-library-oauth2-http</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-recaptchaenterprise</artifactId>
     </dependency>
 
     <dependency>
@@ -470,7 +491,14 @@
     <dependency>
       <groupId>com.apollographql.apollo3</groupId>
       <artifactId>apollo-api-jvm</artifactId>
-      <version>3.7.1</version>
+      <version>3.8.5</version>
+
+      <exclusions>
+        <exclusion>
+          <groupId>org.jetbrains</groupId>
+          <artifactId>annotations</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
 
   </dependencies>
@@ -483,7 +511,6 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-shade-plugin</artifactId>
-            <version>3.2.4</version>
             <configuration>
               <createDependencyReducedPom>true</createDependencyReducedPom>
               <filters>
@@ -518,7 +545,6 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-assembly-plugin</artifactId>
-            <version>3.3.0</version>
             <configuration>
               <descriptors>
                 <descriptor>assembly.xml</descriptor>
@@ -538,7 +564,6 @@
           <plugin>
             <groupId>org.codehaus.mojo</groupId>
             <artifactId>properties-maven-plugin</artifactId>
-            <version>1.0.0</version>
             <executions>
               <execution>
                 <id>read-deploy-configuration</id>
@@ -567,6 +592,16 @@
             <configuration>
               <from>
                 <image>eclipse-temurin@sha256:${docker.image.sha256}</image>
+                <platforms>
+                  <platform>
+                    <architecture>amd64</architecture>
+                    <os>linux</os>
+                  </platform>
+                  <platform>
+                    <architecture>arm64</architecture>
+                    <os>linux</os>
+                  </platform>
+                </platforms>
               </from>
               <to>
                 <image>${docker.repo}:${project.version}</image>
@@ -616,6 +651,30 @@
         </plugins>
       </build>
     </profile>
+    <profile>
+      <id>test-server</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>start-test-server</id>
+                <phase>integration-test</phase>
+                <goals>
+                  <goal>java</goal>
+                </goals>
+                <configuration>
+                  <mainClass>org.whispersystems.textsecuregcm.LocalWhisperServerService</mainClass>
+                  <classpathScope>test</classpathScope>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
   </profiles>
 
   <build>
@@ -624,7 +683,7 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>templating-maven-plugin</artifactId>
-        <version>1.0.0</version>
+        <version>3.0.0</version>
         <executions>
           <execution>
             <id>filter-src</id>
@@ -638,10 +697,9 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
-        <version>3.0.0-M7</version>
         <configuration>
-          <!-- work around PATCH not being a supported method on HttpUrlConnection -->
-          <argLine>--add-opens=java.base/java.net=ALL-UNNAMED</argLine>
+          <!-- add-opens: work around PATCH not being a supported method on HttpUrlConnection -->
+          <argLine>-javaagent:${org.mockito:mockito-core:jar} --add-opens=java.base/java.net=ALL-UNNAMED</argLine>
         </configuration>
       </plugin>
 
@@ -660,7 +718,6 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.0.0</version>
         <executions>
           <execution>
             <id>check-all-service-config</id>
@@ -668,15 +725,15 @@
             <goals>
               <goal>java</goal>
             </goals>
+            <configuration>
+              <mainClass>org.whispersystems.textsecuregcm.CheckServiceConfigurations</mainClass>
+              <classpathScope>test</classpathScope>
+              <arguments>
+                <argument>${project.basedir}/config</argument>
+              </arguments>
+            </configuration>
           </execution>
         </executions>
-        <configuration>
-          <mainClass>org.whispersystems.textsecuregcm.CheckServiceConfigurations</mainClass>
-          <classpathScope>test</classpathScope>
-          <arguments>
-            <argument>${project.basedir}/config</argument>
-          </arguments>
-        </configuration>
       </plugin>
 
       <plugin>

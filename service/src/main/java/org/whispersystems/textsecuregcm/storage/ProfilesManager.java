@@ -14,7 +14,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 import org.whispersystems.textsecuregcm.util.Util;
 import javax.annotation.Nullable;
@@ -26,12 +26,12 @@ public class ProfilesManager {
   private static final String CACHE_PREFIX = "profiles::";
 
   private final Profiles profiles;
-  private final FaultTolerantRedisCluster cacheCluster;
+  private final FaultTolerantRedisClusterClient cacheCluster;
   private final ObjectMapper mapper;
 
 
   public ProfilesManager(final Profiles profiles,
-      final FaultTolerantRedisCluster cacheCluster) {
+      final FaultTolerantRedisClusterClient cacheCluster) {
     this.profiles = profiles;
     this.cacheCluster = cacheCluster;
     this.mapper = SystemMapper.jsonMapper();
@@ -47,9 +47,8 @@ public class ProfilesManager {
         .thenCompose(ignored -> redisSetAsync(uuid, versionedProfile));
   }
 
-  public void deleteAll(UUID uuid) {
-    redisDelete(uuid);
-    profiles.deleteAll(uuid);
+  public CompletableFuture<Void> deleteAll(UUID uuid) {
+    return CompletableFuture.allOf(redisDelete(uuid), profiles.deleteAll(uuid));
   }
 
   public Optional<VersionedProfile> get(UUID uuid, String version) {
@@ -77,7 +76,7 @@ public class ProfilesManager {
     try {
       final String profileJson = mapper.writeValueAsString(profile);
 
-      cacheCluster.useCluster(connection -> connection.sync().hset(getCacheKey(uuid), profile.getVersion(), profileJson));
+      cacheCluster.useCluster(connection -> connection.sync().hset(getCacheKey(uuid), profile.version(), profileJson));
     } catch (JsonProcessingException e) {
       throw new IllegalArgumentException(e);
     }
@@ -93,7 +92,7 @@ public class ProfilesManager {
     }
 
     return cacheCluster.withCluster(connection ->
-        connection.async().hset(getCacheKey(uuid), profile.getVersion(), profileJson))
+        connection.async().hset(getCacheKey(uuid), profile.version(), profileJson))
             .thenRun(Util.NOOP)
             .toCompletableFuture();
   }
@@ -132,8 +131,10 @@ public class ProfilesManager {
     }
   }
 
-  private void redisDelete(UUID uuid) {
-    cacheCluster.useCluster(connection -> connection.sync().del(getCacheKey(uuid)));
+  private CompletableFuture<Void> redisDelete(UUID uuid) {
+    return cacheCluster.withCluster(connection -> connection.async().del(getCacheKey(uuid)))
+        .toCompletableFuture()
+        .thenRun(Util.NOOP);
   }
 
   private String getCacheKey(UUID uuid) {

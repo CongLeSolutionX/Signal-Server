@@ -7,30 +7,28 @@ package org.whispersystems.textsecuregcm.filters;
 
 import static com.codahale.metrics.MetricRegistry.name;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HttpHeaders;
 import com.vdurmont.semver4j.Semver;
-
 import io.grpc.Metadata;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
-import io.grpc.Status;
 import io.micrometer.core.instrument.Metrics;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
-import javax.servlet.Filter;
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.ServletRequest;
-import javax.servlet.ServletResponse;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
+import javax.annotation.Nullable;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicRemoteDeprecationConfiguration;
+import org.whispersystems.textsecuregcm.grpc.RequestAttributesUtil;
 import org.whispersystems.textsecuregcm.grpc.StatusConstants;
-import org.whispersystems.textsecuregcm.grpc.UserAgentInterceptor;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.util.ua.ClientPlatform;
 import org.whispersystems.textsecuregcm.util.ua.UnrecognizedUserAgentException;
@@ -83,7 +81,7 @@ public class RemoteDeprecationFilter implements Filter, ServerInterceptor {
       final Metadata headers,
       final ServerCallHandler<ReqT, RespT> next) {
 
-    if (shouldBlock(UserAgentUtil.userAgentFromGrpcContext())) {
+    if (shouldBlock(RequestAttributesUtil.getUserAgent().orElse(null))) {
       call.close(StatusConstants.UPGRADE_NEEDED_STATUS, new Metadata());
       return new ServerCall.Listener<>() {};
     } else {
@@ -91,7 +89,7 @@ public class RemoteDeprecationFilter implements Filter, ServerInterceptor {
     }
   }
 
-  private boolean shouldBlock(final UserAgent userAgent) {
+  private boolean shouldBlock(@Nullable final UserAgent userAgent) {
     final DynamicRemoteDeprecationConfiguration configuration = dynamicConfigurationManager
         .getConfiguration().getRemoteDeprecationConfiguration();
     final Map<ClientPlatform, Semver> minimumVersionsByPlatform = configuration.getMinimumVersions();

@@ -9,17 +9,21 @@ import static java.util.Objects.requireNonNull;
 
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import java.security.SecureRandom;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import org.apache.commons.lang3.RandomUtils;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.IdentityKeyPair;
+import org.signal.libsignal.protocol.InvalidKeyException;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord;
 import org.signal.libsignal.protocol.util.KeyHelper;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
 import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.storage.Device;
 
@@ -27,9 +31,11 @@ public class TestUser {
 
   private final int registrationId;
 
+  private final int pniRegistrationId;
+
   private final IdentityKeyPair aciIdentityKey;
 
-  private final Map<Long, TestDevice> devices = new ConcurrentHashMap<>();
+  private final Map<Byte, TestDevice> devices = new ConcurrentHashMap<>();
 
   private final byte[] unidentifiedAccessKey;
 
@@ -53,11 +59,14 @@ public class TestUser {
     final IdentityKeyPair pniIdentityKey = IdentityKeyPair.generate();
     // registration id
     final int registrationId = KeyHelper.generateRegistrationId(false);
+    final int pniRegistrationId = KeyHelper.generateRegistrationId(false);
     // uak
-    final byte[] unidentifiedAccessKey = RandomUtils.nextBytes(16);
+    final byte[] unidentifiedAccessKey = new byte[UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH];
+    new SecureRandom().nextBytes(unidentifiedAccessKey);
 
     return new TestUser(
         registrationId,
+        pniRegistrationId,
         aciIdentityKey,
         phoneNumber,
         pniIdentityKey,
@@ -68,6 +77,7 @@ public class TestUser {
 
   public TestUser(
       final int registrationId,
+      final int pniRegistrationId,
       final IdentityKeyPair aciIdentityKey,
       final String phoneNumber,
       final IdentityKeyPair pniIdentityKey,
@@ -75,13 +85,14 @@ public class TestUser {
       final String accountPassword,
       final byte[] registrationPassword) {
     this.registrationId = registrationId;
+    this.pniRegistrationId = pniRegistrationId;
     this.aciIdentityKey = aciIdentityKey;
     this.phoneNumber = phoneNumber;
     this.pniIdentityKey = pniIdentityKey;
     this.unidentifiedAccessKey = unidentifiedAccessKey;
     this.accountPassword = accountPassword;
     this.registrationPassword = registrationPassword;
-    devices.put(Device.MASTER_ID, TestDevice.create(Device.MASTER_ID, aciIdentityKey, pniIdentityKey));
+    devices.put(Device.PRIMARY_ID, TestDevice.create(Device.PRIMARY_ID, aciIdentityKey, pniIdentityKey));
   }
 
   public int registrationId() {
@@ -117,7 +128,7 @@ public class TestUser {
   }
 
   public AccountAttributes accountAttributes() {
-    return new AccountAttributes(true, registrationId, "", "", true, new Device.DeviceCapabilities(false, false, false, false))
+    return new AccountAttributes(true, registrationId, pniRegistrationId, "".getBytes(StandardCharsets.UTF_8), "", true, Set.of())
         .withUnidentifiedAccessKey(unidentifiedAccessKey)
         .withRecoveryPassword(registrationPassword);
   }
@@ -146,21 +157,25 @@ public class TestUser {
     this.registrationPassword = registrationPassword;
   }
 
-  public PreKeySetPublicView preKeys(final long deviceId, final boolean pni) {
+  public PreKeySetPublicView preKeys(final byte deviceId, final boolean pni) {
     final IdentityKeyPair identity = pni
         ? pniIdentityKey
         : aciIdentityKey;
     final TestDevice device = requireNonNull(devices.get(deviceId));
     final SignedPreKeyRecord signedPreKeyRecord = device.latestSignedPreKey(identity);
-    return new PreKeySetPublicView(
-        Collections.emptyList(),
-        identity.getPublicKey(),
-        new SignedPreKeyPublicView(
-            signedPreKeyRecord.getId(),
-            signedPreKeyRecord.getKeyPair().getPublicKey(),
-            signedPreKeyRecord.getSignature()
-        )
-    );
+    try {
+      return new PreKeySetPublicView(
+          Collections.emptyList(),
+          identity.getPublicKey(),
+          new SignedPreKeyPublicView(
+              signedPreKeyRecord.getId(),
+              signedPreKeyRecord.getKeyPair().getPublicKey(),
+              signedPreKeyRecord.getSignature()
+          )
+      );
+    } catch (InvalidKeyException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   public record SignedPreKeyPublicView(

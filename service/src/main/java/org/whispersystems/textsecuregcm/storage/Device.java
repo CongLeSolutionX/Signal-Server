@@ -6,29 +6,42 @@ package org.whispersystems.textsecuregcm.storage;
 
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import java.time.Duration;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.OptionalInt;
-import java.util.concurrent.TimeUnit;
+import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.stream.LongStream;
+import java.util.stream.IntStream;
 import javax.annotation.Nullable;
+import com.google.common.annotations.VisibleForTesting;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
-import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
-import org.whispersystems.textsecuregcm.identity.IdentityType;
-import org.whispersystems.textsecuregcm.util.Util;
+import org.whispersystems.textsecuregcm.util.DeviceCapabilityAdapter;
+import org.whispersystems.textsecuregcm.util.DeviceNameByteArrayAdapter;
 
 public class Device {
 
-  public static final long MASTER_ID = 1;
-  public static final int MAXIMUM_DEVICE_ID = 256;
+  public static final byte PRIMARY_ID = 1;
+  public static final byte MAXIMUM_DEVICE_ID = Byte.MAX_VALUE;
   public static final int MAX_REGISTRATION_ID = 0x3FFF;
-  public static final List<Long> ALL_POSSIBLE_DEVICE_IDS = LongStream.range(1, MAXIMUM_DEVICE_ID).boxed().collect(Collectors.toList());
+  public static final List<Byte> ALL_POSSIBLE_DEVICE_IDS = IntStream.range(Device.PRIMARY_ID, MAXIMUM_DEVICE_ID).boxed()
+      .map(Integer::byteValue).collect(Collectors.toList());
+
+  private static final long ALLOWED_LINKED_IDLE_MILLIS = Duration.ofDays(45).toMillis();
+  private static final long ALLOWED_PRIMARY_IDLE_MILLIS = Duration.ofDays(180).toMillis();
+
+  @JsonDeserialize(using = DeviceIdDeserializer.class)
+  @JsonProperty
+  private byte id;
 
   @JsonProperty
-  private long    id;
-
-  @JsonProperty
-  private String  name;
+  @JsonSerialize(using = DeviceNameByteArrayAdapter.Serializer.class)
+  @JsonDeserialize(using = DeviceNameByteArrayAdapter.Deserializer.class)
+  private byte[] name;
 
   @JsonProperty
   private String  authToken;
@@ -43,13 +56,7 @@ public class Device {
   private String  apnId;
 
   @JsonProperty
-  private String  voipApnId;
-
-  @JsonProperty
   private long pushTimestamp;
-
-  @JsonProperty
-  private long uninstalledFeedback;
 
   @JsonProperty
   private boolean fetchesMessages;
@@ -62,12 +69,6 @@ public class Device {
   private Integer phoneNumberIdentityRegistrationId;
 
   @JsonProperty
-  private ECSignedPreKey signedPreKey;
-
-  @JsonProperty("pniSignedPreKey")
-  private ECSignedPreKey phoneNumberIdentitySignedPreKey;
-
-  @JsonProperty
   private long lastSeen;
 
   @JsonProperty
@@ -77,7 +78,9 @@ public class Device {
   private String userAgent;
 
   @JsonProperty
-  private DeviceCapabilities capabilities;
+  @JsonSerialize(using = DeviceCapabilityAdapter.Serializer.class)
+  @JsonDeserialize(using = DeviceCapabilityAdapter.Deserializer.class)
+  private Set<DeviceCapability> capabilities = Collections.emptySet();
 
   public String getApnId() {
     return apnId;
@@ -89,22 +92,6 @@ public class Device {
     if (apnId != null) {
       this.pushTimestamp = System.currentTimeMillis();
     }
-  }
-
-  public String getVoipApnId() {
-    return voipApnId;
-  }
-
-  public void setVoipApnId(String voipApnId) {
-    this.voipApnId = voipApnId;
-  }
-
-  public void setUninstalledFeedbackTimestamp(long uninstalledFeedback) {
-    this.uninstalledFeedback = uninstalledFeedback;
-  }
-
-  public long getUninstalledFeedbackTimestamp() {
-    return uninstalledFeedback;
   }
 
   public void setLastSeen(long lastSeen) {
@@ -135,19 +122,19 @@ public class Device {
     }
   }
 
-  public long getId() {
+  public byte getId() {
     return id;
   }
 
-  public void setId(long id) {
+  public void setId(byte id) {
     this.id = id;
   }
 
-  public String getName() {
+  public byte[] getName() {
     return name;
   }
 
-  public void setName(String name) {
+  public void setName(byte[] name) {
     this.name = name;
   }
 
@@ -187,20 +174,26 @@ public class Device {
     return new SaltedTokenHash(authToken, salt);
   }
 
-  @Nullable
-  public DeviceCapabilities getCapabilities() {
+  @VisibleForTesting
+  public Set<DeviceCapability> getCapabilities() {
     return capabilities;
   }
 
-  public void setCapabilities(DeviceCapabilities capabilities) {
-    this.capabilities = capabilities;
+  @JsonSetter
+  public void setCapabilities(@Nullable final Set<DeviceCapability> capabilities) {
+    this.capabilities = (capabilities == null || capabilities.isEmpty())
+        ? Collections.emptySet()
+        : EnumSet.copyOf(capabilities);
   }
 
-  public boolean isEnabled() {
-    boolean hasChannel = fetchesMessages || !Util.isEmpty(getApnId()) || !Util.isEmpty(getGcmId());
+  public boolean hasCapability(final DeviceCapability capability) {
+    return capabilities.contains(capability);
+  }
 
-    return (id == MASTER_ID && hasChannel && signedPreKey != null) ||
-           (id != MASTER_ID && hasChannel && signedPreKey != null && lastSeen > (System.currentTimeMillis() - TimeUnit.DAYS.toMillis(30)));
+  public boolean isExpired() {
+    return isPrimary()
+        ? lastSeen < (System.currentTimeMillis() - ALLOWED_PRIMARY_IDLE_MILLIS)
+        : lastSeen < (System.currentTimeMillis() - ALLOWED_LINKED_IDLE_MILLIS);
   }
 
   public boolean getFetchesMessages() {
@@ -211,8 +204,8 @@ public class Device {
     this.fetchesMessages = fetchesMessages;
   }
 
-  public boolean isMaster() {
-    return getId() == MASTER_ID;
+  public boolean isPrimary() {
+    return getId() == PRIMARY_ID;
   }
 
   public int getRegistrationId() {
@@ -231,37 +224,6 @@ public class Device {
     this.phoneNumberIdentityRegistrationId = phoneNumberIdentityRegistrationId;
   }
 
-  public ECSignedPreKey getSignedPreKey(final IdentityType identityType) {
-    return switch (identityType) {
-      case ACI -> signedPreKey;
-      case PNI -> phoneNumberIdentitySignedPreKey;
-    };
-  }
-
-  /**
-   * @deprecated Please use {@link #getSignedPreKey(IdentityType)} instead.
-   */
-  @Deprecated
-  public ECSignedPreKey getSignedPreKey() {
-    return signedPreKey;
-  }
-
-  public void setSignedPreKey(ECSignedPreKey signedPreKey) {
-    this.signedPreKey = signedPreKey;
-  }
-
-  /**
-   * @deprecated Please use {@link #getSignedPreKey(IdentityType)} instead.
-   */
-  @Deprecated
-  public ECSignedPreKey getPhoneNumberIdentitySignedPreKey() {
-    return phoneNumberIdentitySignedPreKey;
-  }
-
-  public void setPhoneNumberIdentitySignedPreKey(final ECSignedPreKey phoneNumberIdentitySignedPreKey) {
-    this.phoneNumberIdentitySignedPreKey = phoneNumberIdentitySignedPreKey;
-  }
-
   public long getPushTimestamp() {
     return pushTimestamp;
   }
@@ -272,8 +234,5 @@ public class Device {
 
   public String getUserAgent() {
     return this.userAgent;
-  }
-
-  public record DeviceCapabilities(boolean storage, boolean transfer, boolean pni, boolean paymentActivation) {
   }
 }

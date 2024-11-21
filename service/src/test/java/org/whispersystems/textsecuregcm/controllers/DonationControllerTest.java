@@ -13,19 +13,17 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.google.common.collect.ImmutableSet;
-import io.dropwizard.auth.PolymorphicAuthValueFactoryProvider;
+import io.dropwizard.auth.AuthValueFactoryProvider;
 import io.dropwizard.testing.junit5.ResourceExtension;
-import java.security.SecureRandom;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 import org.glassfish.jersey.test.grizzly.GrizzlyWebTestContainerFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,8 +32,7 @@ import org.signal.libsignal.zkgroup.InvalidInputException;
 import org.signal.libsignal.zkgroup.receipts.ReceiptCredentialPresentation;
 import org.signal.libsignal.zkgroup.receipts.ReceiptSerial;
 import org.signal.libsignal.zkgroup.receipts.ServerZkReceiptOperations;
-import org.whispersystems.textsecuregcm.auth.AuthenticatedAccount;
-import org.whispersystems.textsecuregcm.auth.DisabledPermittedAuthenticatedAccount;
+import org.whispersystems.textsecuregcm.auth.AuthenticatedDevice;
 import org.whispersystems.textsecuregcm.configuration.BadgeConfiguration;
 import org.whispersystems.textsecuregcm.configuration.BadgesConfiguration;
 import org.whispersystems.textsecuregcm.entities.BadgeSvg;
@@ -46,12 +43,11 @@ import org.whispersystems.textsecuregcm.storage.RedeemedReceiptsManager;
 import org.whispersystems.textsecuregcm.tests.util.AccountsHelper;
 import org.whispersystems.textsecuregcm.tests.util.AuthHelper;
 import org.whispersystems.textsecuregcm.util.TestClock;
+import org.whispersystems.textsecuregcm.util.TestRandomUtil;
 
 class DonationControllerTest {
 
   private static final long nowEpochSeconds = 1_500_000_000L;
-
-  private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
   static BadgesConfiguration getBadgesConfiguration() {
     return new BadgesConfiguration(
@@ -85,11 +81,8 @@ class DonationControllerTest {
     redeemedReceiptsManager = mock(RedeemedReceiptsManager.class);
     accountsManager = mock(AccountsManager.class);
     AccountsHelper.setupMockUpdate(accountsManager);
-    receiptSerialBytes = new byte[ReceiptSerial.SIZE];
-    SECURE_RANDOM.nextBytes(receiptSerialBytes);
-    receiptSerial = new ReceiptSerial(receiptSerialBytes);
-    presentation = new byte[25];
-    SECURE_RANDOM.nextBytes(presentation);
+    receiptSerial = new ReceiptSerial(TestRandomUtil.nextBytes(ReceiptSerial.SIZE));
+    presentation = TestRandomUtil.nextBytes(25);
     receiptCredentialPresentationFactory = mock(DonationController.ReceiptCredentialPresentationFactory.class);
     receiptCredentialPresentation = mock(ReceiptCredentialPresentation.class);
 
@@ -101,8 +94,7 @@ class DonationControllerTest {
 
     resources = ResourceExtension.builder()
         .addProvider(AuthHelper.getAuthFilter())
-        .addProvider(new PolymorphicAuthValueFactoryProvider.Binder<>(
-            ImmutableSet.of(AuthenticatedAccount.class, DisabledPermittedAuthenticatedAccount.class)))
+        .addProvider(new AuthValueFactoryProvider.Binder<>(AuthenticatedDevice.class))
         .setTestContainerFactory(new GrizzlyWebTestContainerFactory())
         .addResource(new DonationController(clock, zkReceiptOperations, redeemedReceiptsManager, accountsManager,
             getBadgesConfiguration(), receiptCredentialPresentationFactory))
@@ -124,7 +116,8 @@ class DonationControllerTest {
     when(receiptCredentialPresentation.getReceiptExpirationTime()).thenReturn(receiptExpiration);
     when(redeemedReceiptsManager.put(same(receiptSerial), eq(receiptExpiration), eq(receiptLevel), eq(AuthHelper.VALID_UUID))).thenReturn(
         CompletableFuture.completedFuture(Boolean.TRUE));
-    when(accountsManager.getByAccountIdentifier(eq(AuthHelper.VALID_UUID))).thenReturn(Optional.of(AuthHelper.VALID_ACCOUNT));
+    when(accountsManager.getByAccountIdentifierAsync(eq(AuthHelper.VALID_UUID))).thenReturn(
+        CompletableFuture.completedFuture(Optional.of(AuthHelper.VALID_ACCOUNT)));
 
     RedeemReceiptRequest request = new RedeemReceiptRequest(presentation, true, true);
     Response response = resources.getJerseyTest()

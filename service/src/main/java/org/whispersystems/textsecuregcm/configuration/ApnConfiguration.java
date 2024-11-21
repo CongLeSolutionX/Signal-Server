@@ -4,13 +4,13 @@
  */
 package org.whispersystems.textsecuregcm.configuration;
 
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.whispersystems.textsecuregcm.configuration.secrets.SecretString;
 
 
-public record ApnConfiguration(@NotBlank String teamId,
-                               @NotBlank String keyId,
+public record ApnConfiguration(@NotNull SecretString teamId,
+                               @NotNull SecretString keyId,
                                @NotNull SecretString signingKey,
                                @NotBlank String bundleId,
                                boolean sandbox) {

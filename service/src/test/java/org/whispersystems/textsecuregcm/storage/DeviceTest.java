@@ -6,71 +6,65 @@
 package org.whispersystems.textsecuregcm.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.mock;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import java.time.Duration;
-import java.util.stream.Stream;
+import java.time.Instant;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-import org.whispersystems.textsecuregcm.entities.ECSignedPreKey;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.whispersystems.textsecuregcm.util.SystemMapper;
 
 class DeviceTest {
 
   @ParameterizedTest
-  @MethodSource
-  void testIsEnabled(final boolean master, final boolean fetchesMessages, final String apnId, final String gcmId,
-      final ECSignedPreKey signedPreKey, final Duration timeSinceLastSeen, final boolean expectEnabled) {
+  @CsvSource({
+      "true, P1D, false",
+      "true, P30D, false",
+      "true, P31D, false",
+      "true, P180D, false",
+      "true, P181D, true",
+      "false, P1D, false",
+      "false, P45D, false",
+      "false, P46D, true",
+      "false, P180D, true",
+  })
+  public void testIsExpired(final boolean primary, final Duration timeSinceLastSeen, final boolean expectExpired) {
 
-    final long lastSeen = System.currentTimeMillis() - timeSinceLastSeen.toMillis();
+    final long lastSeen = Instant.now()
+        .minus(timeSinceLastSeen)
+        // buffer for test runtime
+        .plusSeconds(1)
+        .toEpochMilli();
 
     final Device device = new Device();
-    device.setId(master ? Device.MASTER_ID : Device.MASTER_ID + 1);
-    device.setFetchesMessages(fetchesMessages);
-    device.setApnId(apnId);
-    device.setGcmId(gcmId);
-    device.setSignedPreKey(signedPreKey);
+    device.setId(primary ? Device.PRIMARY_ID : Device.PRIMARY_ID + 1);
     device.setCreated(lastSeen);
     device.setLastSeen(lastSeen);
 
-    assertEquals(expectEnabled, device.isEnabled());
+    assertEquals(expectExpired, device.isExpired());
   }
 
-  private static Stream<Arguments> testIsEnabled() {
-    return Stream.of(
-        //             master fetchesMessages apnId     gcmId     signedPreKey              lastSeen             expectEnabled
-        Arguments.of(true, false, null, null, null, Duration.ofDays(60), false),
-        Arguments.of(true, false, null, null, null, Duration.ofDays(1), false),
-        Arguments.of(true, false, null, null, mock(ECSignedPreKey.class), Duration.ofDays(60), false),
-        Arguments.of(true, false, null, null, mock(ECSignedPreKey.class), Duration.ofDays(1), false),
-        Arguments.of(true, false, null, "gcm-id", null, Duration.ofDays(60), false),
-        Arguments.of(true, false, null, "gcm-id", null, Duration.ofDays(1), false),
-        Arguments.of(true, false, null, "gcm-id", mock(ECSignedPreKey.class), Duration.ofDays(60), true),
-        Arguments.of(true, false, null, "gcm-id", mock(ECSignedPreKey.class), Duration.ofDays(1), true),
-        Arguments.of(true, false, "apn-id", null, null, Duration.ofDays(60), false),
-        Arguments.of(true, false, "apn-id", null, null, Duration.ofDays(1), false),
-        Arguments.of(true, false, "apn-id", null, mock(ECSignedPreKey.class), Duration.ofDays(60), true),
-        Arguments.of(true, false, "apn-id", null, mock(ECSignedPreKey.class), Duration.ofDays(1), true),
-        Arguments.of(true, true, null, null, null, Duration.ofDays(60), false),
-        Arguments.of(true, true, null, null, null, Duration.ofDays(1), false),
-        Arguments.of(true, true, null, null, mock(ECSignedPreKey.class), Duration.ofDays(60), true),
-        Arguments.of(true, true, null, null, mock(ECSignedPreKey.class), Duration.ofDays(1), true),
-        Arguments.of(false, false, null, null, null, Duration.ofDays(60), false),
-        Arguments.of(false, false, null, null, null, Duration.ofDays(1), false),
-        Arguments.of(false, false, null, null, mock(ECSignedPreKey.class), Duration.ofDays(60), false),
-        Arguments.of(false, false, null, null, mock(ECSignedPreKey.class), Duration.ofDays(1), false),
-        Arguments.of(false, false, null, "gcm-id", null, Duration.ofDays(60), false),
-        Arguments.of(false, false, null, "gcm-id", null, Duration.ofDays(1), false),
-        Arguments.of(false, false, null, "gcm-id", mock(ECSignedPreKey.class), Duration.ofDays(60), false),
-        Arguments.of(false, false, null, "gcm-id", mock(ECSignedPreKey.class), Duration.ofDays(1), true),
-        Arguments.of(false, false, "apn-id", null, null, Duration.ofDays(60), false),
-        Arguments.of(false, false, "apn-id", null, null, Duration.ofDays(1), false),
-        Arguments.of(false, false, "apn-id", null, mock(ECSignedPreKey.class), Duration.ofDays(60), false),
-        Arguments.of(false, false, "apn-id", null, mock(ECSignedPreKey.class), Duration.ofDays(1), true),
-        Arguments.of(false, true, null, null, null, Duration.ofDays(60), false),
-        Arguments.of(false, true, null, null, null, Duration.ofDays(1), false),
-        Arguments.of(false, true, null, null, mock(ECSignedPreKey.class), Duration.ofDays(60), false),
-        Arguments.of(false, true, null, null, mock(ECSignedPreKey.class), Duration.ofDays(1), true)
-    );
+  @Test
+  void deserializeCapabilities() throws JsonProcessingException {
+    {
+      final Device device = SystemMapper.jsonMapper().readValue("""
+          {
+            "capabilities": null
+          }
+          """, Device.class);
+
+      assertNotNull(device.getCapabilities(),
+          "Device deserialization should populate null capabilities with an empty set");
+    }
+
+    {
+      final Device device = SystemMapper.jsonMapper().readValue("{}", Device.class);
+
+      assertNotNull(device.getCapabilities(),
+          "Device deserialization should populate null capabilities with an empty set");
+    }
   }
+
 }

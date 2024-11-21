@@ -5,103 +5,23 @@
 
 package org.whispersystems.textsecuregcm.captcha;
 
-import static com.codahale.metrics.MetricRegistry.name;
-
-import com.codahale.metrics.Meter;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.SharedMetricRegistries;
 import java.io.IOException;
 import java.util.Optional;
-import java.util.Set;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicCaptchaConfiguration;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.controllers.AccountController;
-import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
-import org.whispersystems.textsecuregcm.limits.RateLimiters;
-import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
-import org.whispersystems.textsecuregcm.util.Constants;
-import org.whispersystems.textsecuregcm.util.Util;
+import java.util.UUID;
 
 public class RegistrationCaptchaManager {
 
-  private static final Logger logger = LoggerFactory.getLogger(RegistrationCaptchaManager.class);
-
-  private final MetricRegistry metricRegistry = SharedMetricRegistries.getOrCreate(Constants.METRICS_NAME);
-  private final Meter countryFilteredHostMeter = metricRegistry.meter(
-      name(AccountController.class, "country_limited_host"));
-  private final Meter rateLimitedHostMeter = metricRegistry.meter(name(AccountController.class, "rate_limited_host"));
-  private final Meter rateLimitedPrefixMeter = metricRegistry.meter(
-      name(AccountController.class, "rate_limited_prefix"));
-
   private final CaptchaChecker captchaChecker;
-  private final RateLimiters rateLimiters;
-  private final Set<String> testDevices;
-  private final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager;
 
-
-  public RegistrationCaptchaManager(final CaptchaChecker captchaChecker, final RateLimiters rateLimiters,
-      final Set<String> testDevices,
-      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
+  public RegistrationCaptchaManager(final CaptchaChecker captchaChecker) {
     this.captchaChecker = captchaChecker;
-    this.rateLimiters = rateLimiters;
-    this.testDevices = testDevices;
-    this.dynamicConfigurationManager = dynamicConfigurationManager;
   }
 
   @SuppressWarnings("OptionalUsedAsFieldOrParameterType")
-  public Optional<AssessmentResult> assessCaptcha(final Optional<String> captcha, final String sourceHost)
+  public Optional<AssessmentResult> assessCaptcha(final Optional<UUID> aci, final Optional<String> captcha, final String sourceHost, final String userAgent)
       throws IOException {
     return captcha.isPresent()
-        ? Optional.of(captchaChecker.verify(Action.REGISTRATION, captcha.get(), sourceHost))
+        ? Optional.of(captchaChecker.verify(aci, Action.REGISTRATION, captcha.get(), sourceHost, userAgent))
         : Optional.empty();
   }
-
-  public boolean requiresCaptcha(final String number, final String forwardedFor, String sourceHost,
-      final boolean pushChallengeMatch) {
-    if (testDevices.contains(number)) {
-      return false;
-    }
-
-    if (!pushChallengeMatch) {
-      return true;
-    }
-
-    final String countryCode = Util.getCountryCode(number);
-    final String region = Util.getRegion(number);
-
-    DynamicCaptchaConfiguration captchaConfig = dynamicConfigurationManager.getConfiguration()
-        .getCaptchaConfiguration();
-
-    boolean countryFiltered = captchaConfig.getSignupCountryCodes().contains(countryCode) ||
-        captchaConfig.getSignupRegions().contains(region);
-
-    try {
-      rateLimiters.getSmsVoiceIpLimiter().validate(sourceHost);
-    } catch (RateLimitExceededException e) {
-      logger.info("Rate limit exceeded: {}, {} ({})", number, sourceHost, forwardedFor);
-      rateLimitedHostMeter.mark();
-
-      return true;
-    }
-
-    try {
-      rateLimiters.getSmsVoicePrefixLimiter().validate(Util.getNumberPrefix(number));
-    } catch (RateLimitExceededException e) {
-      logger.info("Prefix rate limit exceeded: {}, {} ({})", number, sourceHost, forwardedFor);
-      rateLimitedPrefixMeter.mark();
-
-      return true;
-    }
-
-    if (countryFiltered) {
-      countryFilteredHostMeter.mark();
-      return true;
-    }
-
-    return false;
-  }
-
 }

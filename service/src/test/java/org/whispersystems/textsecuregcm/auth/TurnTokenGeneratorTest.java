@@ -1,22 +1,20 @@
 package org.whispersystems.textsecuregcm.auth;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import org.junit.jupiter.api.Test;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
-import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import org.junit.jupiter.api.Test;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 
 public class TurnTokenGeneratorTest {
-
   @Test
   public void testAlwaysSelectFirst() throws JsonProcessingException {
     final String configString = """
@@ -30,7 +28,7 @@ public class TurnTokenGeneratorTest {
             - uris:
                 - never.org
               weight: 0
-         """;
+        """;
     DynamicConfiguration config = DynamicConfigurationManager
         .parseConfiguration(configString, DynamicConfiguration.class)
         .orElseThrow();
@@ -82,6 +80,7 @@ public class TurnTokenGeneratorTest {
         DynamicConfigurationManager.class);
 
     when(mockDynamicConfigManager.getConfiguration()).thenReturn(config);
+
     final TurnTokenGenerator turnTokenGenerator =
         new TurnTokenGenerator(mockDynamicConfigManager, "bloop".getBytes(StandardCharsets.UTF_8));
 

@@ -12,11 +12,11 @@ import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
 import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
 import org.whispersystems.textsecuregcm.storage.Account;
 
-public record IncomingMessage(int type, long destinationDeviceId, int destinationRegistrationId, String content) {
+public record IncomingMessage(int type, byte destinationDeviceId, int destinationRegistrationId, String content) {
 
   public MessageProtos.Envelope toEnvelope(final ServiceIdentifier destinationIdentifier,
       @Nullable Account sourceAccount,
-      @Nullable Long sourceDeviceId,
+      @Nullable Byte sourceDeviceId,
       final long timestamp,
       final boolean story,
       final boolean urgent,
@@ -31,15 +31,15 @@ public record IncomingMessage(int type, long destinationDeviceId, int destinatio
     final MessageProtos.Envelope.Builder envelopeBuilder = MessageProtos.Envelope.newBuilder();
 
     envelopeBuilder.setType(envelopeType)
-        .setTimestamp(timestamp)
+        .setClientTimestamp(timestamp)
         .setServerTimestamp(System.currentTimeMillis())
-        .setDestinationUuid(destinationIdentifier.toServiceIdentifierString())
+        .setDestinationServiceId(destinationIdentifier.toServiceIdentifierString())
         .setStory(story)
         .setUrgent(urgent);
 
     if (sourceAccount != null && sourceDeviceId != null) {
       envelopeBuilder
-          .setSourceUuid(new AciServiceIdentifier(sourceAccount.getUuid()).toServiceIdentifierString())
+          .setSourceServiceId(new AciServiceIdentifier(sourceAccount.getUuid()).toServiceIdentifierString())
           .setSourceDevice(sourceDeviceId.intValue());
     }
 

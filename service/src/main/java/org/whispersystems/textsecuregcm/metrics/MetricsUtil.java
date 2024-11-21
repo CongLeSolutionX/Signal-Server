@@ -7,23 +7,29 @@ package org.whispersystems.textsecuregcm.metrics;
 
 import com.codahale.metrics.SharedMetricRegistries;
 import com.google.common.annotations.VisibleForTesting;
-import io.dropwizard.setup.Environment;
+import io.dropwizard.core.setup.Environment;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
+import io.micrometer.core.instrument.binder.jvm.JvmThreadMetrics;
+import io.micrometer.core.instrument.binder.system.FileDescriptorMetrics;
+import io.micrometer.core.instrument.binder.system.ProcessorMetrics;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.distribution.DistributionStatisticConfig;
-import io.micrometer.datadog.DatadogMeterRegistry;
-import java.util.concurrent.TimeUnit;
+import io.micrometer.statsd.StatsdMeterRegistry;
 import org.whispersystems.textsecuregcm.WhisperServerConfiguration;
 import org.whispersystems.textsecuregcm.WhisperServerVersion;
+import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
+import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.util.Constants;
-import org.whispersystems.textsecuregcm.util.HostnameUtil;
 
 public class MetricsUtil {
 
   public static final String PREFIX = "chat";
+
+  private static volatile boolean registeredMetrics = false;
 
   /**
    * Returns a dot-separated ('.') name for the given class and name parts
@@ -41,29 +47,40 @@ public class MetricsUtil {
     return sb.toString();
   }
 
-  public static void configureRegistries(final WhisperServerConfiguration config, final Environment environment) {
+  public static void configureRegistries(final WhisperServerConfiguration config, final Environment environment,
+      DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
+
+    if (registeredMetrics) {
+      throw new IllegalStateException("Metric registries configured more than once");
+    }
+
+    registeredMetrics = true;
+
     SharedMetricRegistries.add(Constants.METRICS_NAME, environment.metrics());
 
     {
-      final DatadogMeterRegistry datadogMeterRegistry = new DatadogMeterRegistry(
+      final StatsdMeterRegistry dogstatsdMeterRegistry = new StatsdMeterRegistry(
           config.getDatadogConfiguration(), io.micrometer.core.instrument.Clock.SYSTEM);
 
-      datadogMeterRegistry.config().commonTags(
+      dogstatsdMeterRegistry.config().commonTags(
           Tags.of(
               "service", "chat",
-              "host", HostnameUtil.getLocalHostname(),
               "version", WhisperServerVersion.getServerVersion(),
               "env", config.getDatadogConfiguration().getEnvironment()));
-      configureMeterFilters(datadogMeterRegistry.config());
-      Metrics.addRegistry(datadogMeterRegistry);
+
+      configureMeterFilters(dogstatsdMeterRegistry.config(), dynamicConfigurationManager);
+      Metrics.addRegistry(dogstatsdMeterRegistry);
     }
 
-    environment.lifecycle().manage(new MicrometerRegistryManager(Metrics.globalRegistry));
-    environment.lifecycle().manage(new ApplicationShutdownMonitor(Metrics.globalRegistry));
+    environment.lifecycle().addEventListener(new ApplicationShutdownMonitor(Metrics.globalRegistry));
+    environment.lifecycle().addEventListener(
+        new MicrometerRegistryManager(Metrics.globalRegistry,
+            config.getDatadogConfiguration().getShutdownWaitDuration()));
   }
 
   @VisibleForTesting
-  static MeterRegistry.Config configureMeterFilters(MeterRegistry.Config config) {
+  static MeterRegistry.Config configureMeterFilters(MeterRegistry.Config config,
+      final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
     final DistributionStatisticConfig defaultDistributionStatisticConfig = DistributionStatisticConfig.builder()
         .percentiles(.75, .95, .99, .999)
         .build();
@@ -83,32 +100,27 @@ public class MetricsUtil {
               return id.withName(PREFIX + "." + id.getName())
                   .replaceTags(id.getTags().stream()
                       .filter(tag -> !"command".equals(tag.getKey()))
+                      .filter(tag -> dynamicConfigurationManager.getConfiguration().getMetricsConfiguration().
+                          enableLettuceRemoteTag() || !"remote".equals(tag.getKey()))
                       .toList());
             }
 
             return MeterFilter.super.map(id);
           }
         })
-        // Deny lettuce metrics, but leave command.completions.max. Note that regardless of configured order, accept
-        // filters are applied after map filters.
-        .meterFilter(MeterFilter.deny(id ->
-              id.getName().startsWith(PREFIX + ".lettuce") && !id.getName().contains("command.completion.max")
-        ));
+        .meterFilter(MeterFilter.denyNameStartsWith(MessageMetrics.DELIVERY_LATENCY_TIMER_NAME + ".percentile"));
   }
 
   public static void registerSystemResourceMetrics(final Environment environment) {
-    environment.metrics().register(name(CpuUsageGauge.class, "cpu"), new CpuUsageGauge(3, TimeUnit.SECONDS));
-    environment.metrics().register(name(FreeMemoryGauge.class, "free_memory"), new FreeMemoryGauge());
-    environment.metrics().register(name(NetworkSentGauge.class, "bytes_sent"), new NetworkSentGauge());
-    environment.metrics().register(name(NetworkReceivedGauge.class, "bytes_received"), new NetworkReceivedGauge());
-    environment.metrics().register(name(FileDescriptorGauge.class, "fd_count"), new FileDescriptorGauge());
-    environment.metrics().register(name(MaxFileDescriptorGauge.class, "max_fd_count"), new MaxFileDescriptorGauge());
-    environment.metrics()
-        .register(name(OperatingSystemMemoryGauge.class, "buffers"), new OperatingSystemMemoryGauge("Buffers"));
-    environment.metrics()
-        .register(name(OperatingSystemMemoryGauge.class, "cached"), new OperatingSystemMemoryGauge("Cached"));
+    new ProcessorMetrics().bindTo(Metrics.globalRegistry);
+    new FreeMemoryGauge().bindTo(Metrics.globalRegistry);
+    new FileDescriptorMetrics().bindTo(Metrics.globalRegistry);
+    new OperatingSystemMemoryGauge("Buffers").bindTo(Metrics.globalRegistry);
+    new OperatingSystemMemoryGauge("Cached").bindTo(Metrics.globalRegistry);
 
-    BufferPoolGauges.registerMetrics();
+    new JvmMemoryMetrics().bindTo(Metrics.globalRegistry);
+    new JvmThreadMetrics().bindTo(Metrics.globalRegistry);
+
     GarbageCollectionGauges.registerMetrics();
   }
 

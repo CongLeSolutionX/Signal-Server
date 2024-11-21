@@ -23,6 +23,7 @@ import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import org.whispersystems.textsecuregcm.configuration.ApnConfiguration;
@@ -32,12 +33,6 @@ public class APNSender implements Managed, PushNotificationSender {
   private final ExecutorService executor;
   private final String bundleId;
   private final ApnsClient apnsClient;
-
-  @VisibleForTesting
-  static final String APN_VOIP_NOTIFICATION_PAYLOAD = new SimpleApnsPayloadBuilder()
-      .setSound("default")
-      .setLocalizedAlertMessage("APN_Message")
-      .build();
 
   @VisibleForTesting
   static final String APN_NSE_NOTIFICATION_PAYLOAD = new SimpleApnsPayloadBuilder()
@@ -64,7 +59,7 @@ public class APNSender implements Managed, PushNotificationSender {
     this.bundleId = configuration.bundleId();
     this.apnsClient = new ApnsClientBuilder().setSigningKey(
             ApnsSigningKey.loadFromInputStream(new ByteArrayInputStream(configuration.signingKey().value().getBytes()),
-                configuration.teamId(), configuration.keyId()))
+                configuration.teamId().value(), configuration.keyId().value()))
         .setTrustedServerCertificateChain(getClass().getResourceAsStream(APNS_CA_FILENAME))
         .setApnsServer(configuration.sandbox() ? ApnsClientBuilder.DEVELOPMENT_APNS_HOST : ApnsClientBuilder.PRODUCTION_APNS_HOST)
         .build();
@@ -79,22 +74,8 @@ public class APNSender implements Managed, PushNotificationSender {
 
   @Override
   public CompletableFuture<SendPushNotificationResult> sendNotification(final PushNotification notification) {
-    final String topic = switch (notification.tokenType()) {
-      case APN -> bundleId;
-      case APN_VOIP -> bundleId + ".voip";
-      default -> throw new IllegalArgumentException("Unsupported token type: " + notification.tokenType());
-    };
-
-    final boolean isVoip = notification.tokenType() == PushNotification.TokenType.APN_VOIP;
-
     final String payload = switch (notification.notificationType()) {
-      case NOTIFICATION -> {
-        if (isVoip) {
-          yield APN_VOIP_NOTIFICATION_PAYLOAD;
-        } else {
-          yield notification.urgent() ? APN_NSE_NOTIFICATION_PAYLOAD : APN_BACKGROUND_PAYLOAD;
-        }
-      }
+      case NOTIFICATION -> notification.urgent() ? APN_NSE_NOTIFICATION_PAYLOAD : APN_BACKGROUND_PAYLOAD;
 
       case ATTEMPT_LOGIN_NOTIFICATION_HIGH_PRIORITY -> new SimpleApnsPayloadBuilder()
           .setMutableContent(true)
@@ -102,43 +83,39 @@ public class APNSender implements Managed, PushNotificationSender {
           .addCustomProperty("attemptLoginContext", notification.data())
           .build();
 
-      case ATTEMPT_LOGIN_NOTIFICATION_LOW_PRIORITY -> new SimpleApnsPayloadBuilder()
-          .setContentAvailable(true)
-          .addCustomProperty("attemptLoginContext", notification.data())
-          .build();
-
       case CHALLENGE -> new SimpleApnsPayloadBuilder()
-          .setSound("default")
-          .setLocalizedAlertMessage("APN_Message")
+          .setContentAvailable(true)
           .addCustomProperty("challenge", notification.data())
           .build();
 
       case RATE_LIMIT_CHALLENGE -> new SimpleApnsPayloadBuilder()
-          .setSound("default")
-          .setLocalizedAlertMessage("APN_Message")
+          .setContentAvailable(true)
           .addCustomProperty("rateLimitChallenge", notification.data())
           .build();
     };
 
-    final PushType pushType;
+    final PushType pushType = switch (notification.notificationType()) {
+      case NOTIFICATION -> notification.urgent() ? PushType.ALERT : PushType.BACKGROUND;
+      case ATTEMPT_LOGIN_NOTIFICATION_HIGH_PRIORITY -> PushType.ALERT;
+      case CHALLENGE, RATE_LIMIT_CHALLENGE -> PushType.BACKGROUND;
+    };
 
-    if (isVoip) {
-      pushType = PushType.VOIP;
+    final DeliveryPriority deliveryPriority;
+
+    if (pushType == PushType.BACKGROUND) {
+      deliveryPriority = DeliveryPriority.CONSERVE_POWER;
     } else {
-      pushType = notification.urgent() ? PushType.ALERT : PushType.BACKGROUND;
+      deliveryPriority = notification.urgent() ? DeliveryPriority.IMMEDIATE : DeliveryPriority.CONSERVE_POWER;
     }
 
-    final DeliveryPriority deliveryPriority =
-        (notification.urgent() || isVoip) ? DeliveryPriority.IMMEDIATE : DeliveryPriority.CONSERVE_POWER;
-
     final String collapseId =
-        (notification.notificationType() == PushNotification.NotificationType.NOTIFICATION && notification.urgent() && !isVoip)
+        (notification.notificationType() == PushNotification.NotificationType.NOTIFICATION && notification.urgent())
             ? "incoming-message" : null;
 
     final Instant start = Instant.now();
 
     return apnsClient.sendNotification(new SimpleApnsPushNotification(notification.deviceToken(),
-        topic,
+        bundleId,
         payload,
         MAX_EXPIRATION,
         deliveryPriority,
@@ -152,20 +129,21 @@ public class APNSender implements Managed, PushNotificationSender {
         })
         .thenApplyAsync(response -> {
           final boolean accepted;
-          final String rejectionReason;
+          final Optional<String> rejectionReason;
           final boolean unregistered;
 
           if (response.isAccepted()) {
             accepted = true;
-            rejectionReason = null;
+            rejectionReason = Optional.empty();
             unregistered = false;
           } else {
             accepted = false;
-            rejectionReason = response.getRejectionReason().orElse("unknown");
-            unregistered = ("Unregistered".equals(rejectionReason) || "BadDeviceToken".equals(rejectionReason));
+            rejectionReason = response.getRejectionReason();
+            unregistered = response.getRejectionReason().map(reason -> "Unregistered".equals(reason) || "BadDeviceToken".equals(reason) || "ExpiredToken".equals(reason))
+                .orElse(false);
           }
 
-          return new SendPushNotificationResult(accepted, rejectionReason, unregistered);
+          return new SendPushNotificationResult(accepted, rejectionReason, unregistered, response.getTokenInvalidationTimestamp());
         }, executor);
   }
 

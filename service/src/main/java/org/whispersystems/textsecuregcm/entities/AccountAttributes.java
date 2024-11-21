@@ -4,15 +4,21 @@
  */
 package org.whispersystems.textsecuregcm.entities;
 
+import static org.whispersystems.textsecuregcm.util.RegistrationIdValidator.validRegistrationId;
+
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.google.common.annotations.VisibleForTesting;
+import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.Size;
 import java.util.Optional;
-import java.util.OptionalInt;
+import java.util.Set;
 import javax.annotation.Nullable;
-import javax.validation.constraints.Size;
-import org.whispersystems.textsecuregcm.storage.Device.DeviceCapabilities;
+import org.whispersystems.textsecuregcm.auth.UnidentifiedAccessUtil;
+import org.whispersystems.textsecuregcm.storage.DeviceCapability;
 import org.whispersystems.textsecuregcm.util.ByteArrayAdapter;
+import org.whispersystems.textsecuregcm.util.DeviceCapabilityAdapter;
 import org.whispersystems.textsecuregcm.util.ExactlySize;
 
 public class AccountAttributes {
@@ -24,24 +30,29 @@ public class AccountAttributes {
   private int registrationId;
 
   @JsonProperty("pniRegistrationId")
-  private Integer phoneNumberIdentityRegistrationId;
+  private int phoneNumberIdentityRegistrationId;
 
   @JsonProperty
-  @Size(max = 204, message = "This field must be less than 50 characters")
-  private String name;
+  @JsonSerialize(using = ByteArrayAdapter.Serializing.class)
+  @JsonDeserialize(using = ByteArrayAdapter.Deserializing.class)
+  @Size(max = 225)
+  private byte[] name;
 
   @JsonProperty
   private String registrationLock;
 
   @JsonProperty
-  @ExactlySize({0, 16})
+  @ExactlySize({0, UnidentifiedAccessUtil.UNIDENTIFIED_ACCESS_KEY_LENGTH})
   private byte[] unidentifiedAccessKey;
 
   @JsonProperty
   private boolean unrestrictedUnidentifiedAccess;
 
   @JsonProperty
-  private DeviceCapabilities capabilities;
+  @JsonSerialize(using = DeviceCapabilityAdapter.Serializer.class)
+  @JsonDeserialize(using = DeviceCapabilityAdapter.Deserializer.class)
+  @Nullable
+  private Set<DeviceCapability> capabilities;
 
   @JsonProperty
   private boolean discoverableByPhoneNumber = true;
@@ -58,12 +69,14 @@ public class AccountAttributes {
   public AccountAttributes(
       final boolean fetchesMessages,
       final int registrationId,
-      final String name,
+      final int phoneNumberIdentifierRegistrationId,
+      final byte[] name,
       final String registrationLock,
       final boolean discoverableByPhoneNumber,
-      final DeviceCapabilities capabilities) {
+      final Set<DeviceCapability> capabilities) {
     this.fetchesMessages = fetchesMessages;
     this.registrationId = registrationId;
+    this.phoneNumberIdentityRegistrationId = phoneNumberIdentifierRegistrationId;
     this.name = name;
     this.registrationLock = registrationLock;
     this.discoverableByPhoneNumber = discoverableByPhoneNumber;
@@ -78,11 +91,11 @@ public class AccountAttributes {
     return registrationId;
   }
 
-  public OptionalInt getPhoneNumberIdentityRegistrationId() {
-    return phoneNumberIdentityRegistrationId != null ? OptionalInt.of(phoneNumberIdentityRegistrationId) : OptionalInt.empty();
+  public int getPhoneNumberIdentityRegistrationId() {
+    return phoneNumberIdentityRegistrationId;
   }
 
-  public String getName() {
+  public byte[] getName() {
     return name;
   }
 
@@ -98,7 +111,8 @@ public class AccountAttributes {
     return unrestrictedUnidentifiedAccess;
   }
 
-  public DeviceCapabilities getCapabilities() {
+  @Nullable
+  public Set<DeviceCapability> getCapabilities() {
     return capabilities;
   }
 
@@ -120,5 +134,10 @@ public class AccountAttributes {
   public AccountAttributes withRecoveryPassword(final byte[] recoveryPassword) {
     this.recoveryPassword = recoveryPassword;
     return this;
+  }
+
+  @AssertTrue
+  public boolean isEachRegistrationIdValid() {
+    return validRegistrationId(registrationId) && validRegistrationId(phoneNumberIdentityRegistrationId);
   }
 }

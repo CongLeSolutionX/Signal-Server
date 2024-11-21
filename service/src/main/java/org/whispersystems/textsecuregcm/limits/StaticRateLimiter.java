@@ -20,7 +20,7 @@ import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfigurati
 import org.whispersystems.textsecuregcm.controllers.RateLimitExceededException;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
 import org.whispersystems.textsecuregcm.redis.ClusterLuaScript;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.util.ExceptionUtils;
 import org.whispersystems.textsecuregcm.util.Util;
@@ -36,7 +36,7 @@ public class StaticRateLimiter implements RateLimiter {
 
   private final ClusterLuaScript validateScript;
 
-  private final FaultTolerantRedisCluster cacheCluster;
+  private final FaultTolerantRedisClusterClient cacheCluster;
 
   private final Clock clock;
 
@@ -45,7 +45,7 @@ public class StaticRateLimiter implements RateLimiter {
       final String name,
       final RateLimiterConfig config,
       final ClusterLuaScript validateScript,
-      final FaultTolerantRedisCluster cacheCluster,
+      final FaultTolerantRedisClusterClient cacheCluster,
       final Clock clock,
       final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager) {
     this.name = requireNonNull(name);
@@ -53,7 +53,7 @@ public class StaticRateLimiter implements RateLimiter {
     this.validateScript = requireNonNull(validateScript);
     this.cacheCluster = requireNonNull(cacheCluster);
     this.clock = requireNonNull(clock);
-    this.counter = Metrics.counter(MetricsUtil.name(getClass(), "exceeded"), "name", name);
+    this.counter = Metrics.counter(MetricsUtil.name(getClass(), "exceeded"), "rateLimiterName", name);
     this.dynamicConfigurationManager = dynamicConfigurationManager;
   }
 
@@ -65,7 +65,7 @@ public class StaticRateLimiter implements RateLimiter {
         counter.increment();
         final Duration retryAfter = Duration.ofMillis(
             (long) Math.ceil((double) deficitPermitsAmount / config.leakRatePerMillis()));
-        throw new RateLimitExceededException(retryAfter, true);
+        throw new RateLimitExceededException(retryAfter);
       }
     } catch (RedisException e) {
       if (!failOpen()) {
@@ -84,7 +84,7 @@ public class StaticRateLimiter implements RateLimiter {
           counter.increment();
           final Duration retryAfter = Duration.ofMillis(
               (long) Math.ceil((double) deficitPermitsAmount / config.leakRatePerMillis()));
-          return failedFuture(new RateLimitExceededException(retryAfter, true));
+          return failedFuture(new RateLimitExceededException(retryAfter));
         })
         .exceptionally(throwable -> {
           if (ExceptionUtils.unwrap(throwable) instanceof RedisException && failOpen()) {

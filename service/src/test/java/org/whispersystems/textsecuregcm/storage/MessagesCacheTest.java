@@ -5,8 +5,11 @@
 
 package org.whispersystems.textsecuregcm.storage;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,6 +28,8 @@ import io.lettuce.core.cluster.api.async.RedisAdvancedClusterAsyncCommands;
 import io.lettuce.core.cluster.api.reactive.RedisAdvancedClusterReactiveCommands;
 import io.lettuce.core.protocol.AsyncCommand;
 import io.lettuce.core.protocol.RedisCommand;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -32,9 +37,12 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
@@ -42,11 +50,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -57,8 +65,11 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.reactivestreams.Publisher;
+import org.signal.libsignal.protocol.SealedSenderMultiRecipientMessage;
 import org.whispersystems.textsecuregcm.entities.MessageProtos;
-import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisCluster;
+import org.whispersystems.textsecuregcm.identity.AciServiceIdentifier;
+import org.whispersystems.textsecuregcm.identity.ServiceIdentifier;
+import org.whispersystems.textsecuregcm.redis.FaultTolerantRedisClusterClient;
 import org.whispersystems.textsecuregcm.redis.RedisClusterExtension;
 import org.whispersystems.textsecuregcm.tests.util.RedisClusterHelper;
 import reactor.core.publisher.Flux;
@@ -85,29 +96,19 @@ class MessagesCacheTest {
 
     private static final UUID DESTINATION_UUID = UUID.randomUUID();
 
-    private static final int DESTINATION_DEVICE_ID = 7;
+    private static final byte DESTINATION_DEVICE_ID = 7;
 
     @BeforeEach
     void setUp() throws Exception {
-
-      REDIS_CLUSTER_EXTENSION.getRedisCluster().useCluster(connection -> {
-        connection.sync().flushall();
-        connection.sync().upstream().commands().configSet("notify-keyspace-events", "K$glz");
-      });
-
       sharedExecutorService = Executors.newSingleThreadExecutor();
       resubscribeRetryExecutorService = Executors.newSingleThreadScheduledExecutor();
       messageDeliveryScheduler = Schedulers.newBoundedElastic(10, 10_000, "messageDelivery");
       messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(),
-          REDIS_CLUSTER_EXTENSION.getRedisCluster(), sharedExecutorService, messageDeliveryScheduler, sharedExecutorService, Clock.systemUTC());
-
-      messagesCache.start();
+          messageDeliveryScheduler, sharedExecutorService, Clock.systemUTC());
     }
 
     @AfterEach
     void tearDown() throws Exception {
-      messagesCache.stop();
-
       sharedExecutorService.shutdown();
       sharedExecutorService.awaitTermination(1, TimeUnit.SECONDS);
 
@@ -120,8 +121,8 @@ class MessagesCacheTest {
     @ValueSource(booleans = {true, false})
     void testInsert(final boolean sealedSender) {
       final UUID messageGuid = UUID.randomUUID();
-      assertTrue(messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-          generateRandomMessage(messageGuid, sealedSender)) > 0);
+      assertDoesNotThrow(() -> messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID,
+          generateRandomMessage(messageGuid, sealedSender)));
     }
 
     @Test
@@ -129,12 +130,13 @@ class MessagesCacheTest {
       final UUID duplicateGuid = UUID.randomUUID();
       final MessageProtos.Envelope duplicateMessage = generateRandomMessage(duplicateGuid, false);
 
-      final long firstId = messagesCache.insert(duplicateGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-          duplicateMessage);
-      final long secondId = messagesCache.insert(duplicateGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-          duplicateMessage);
+      messagesCache.insert(duplicateGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, duplicateMessage);
+      messagesCache.insert(duplicateGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, duplicateMessage);
 
-      assertEquals(firstId, secondId);
+      assertEquals(1, messagesCache.getAllMessages(DESTINATION_UUID, DESTINATION_DEVICE_ID, 0, 10)
+          .count()
+          .blockOptional()
+          .orElse(0L));
     }
 
     @ParameterizedTest
@@ -148,10 +150,10 @@ class MessagesCacheTest {
       final MessageProtos.Envelope message = generateRandomMessage(messageGuid, sealedSender);
 
       messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, message);
-      final Optional<MessageProtos.Envelope> maybeRemovedMessage = messagesCache.remove(DESTINATION_UUID,
+      final Optional<RemovedMessage> maybeRemovedMessage = messagesCache.remove(DESTINATION_UUID,
           DESTINATION_DEVICE_ID, messageGuid).get(5, TimeUnit.SECONDS);
 
-      assertEquals(Optional.of(message), maybeRemovedMessage);
+      assertEquals(Optional.of(RemovedMessage.fromEnvelope(message)), maybeRemovedMessage);
     }
 
     @ParameterizedTest
@@ -181,13 +183,12 @@ class MessagesCacheTest {
             message);
       }
 
-      final List<MessageProtos.Envelope> removedMessages = messagesCache.remove(DESTINATION_UUID, DESTINATION_DEVICE_ID,
+      final List<RemovedMessage> removedMessages = messagesCache.remove(DESTINATION_UUID, DESTINATION_DEVICE_ID,
           messagesToRemove.stream().map(message -> UUID.fromString(message.getServerGuid()))
               .collect(Collectors.toList())).get(5, TimeUnit.SECONDS);
 
-      assertEquals(messagesToRemove, removedMessages);
-      assertEquals(messagesToPreserve,
-          messagesCache.getMessagesToPersist(DESTINATION_UUID, DESTINATION_DEVICE_ID, messageCount));
+      assertEquals(messagesToRemove.stream().map(RemovedMessage::fromEnvelope).toList(), removedMessages);
+      assertEquals(messagesToPreserve, get(DESTINATION_UUID, DESTINATION_DEVICE_ID, messageCount));
     }
 
     @Test
@@ -201,6 +202,42 @@ class MessagesCacheTest {
       assertTrue(messagesCache.hasMessages(DESTINATION_UUID, DESTINATION_DEVICE_ID));
     }
 
+    @Test
+    void testHasMessagesAsync() {
+      assertFalse(messagesCache.hasMessagesAsync(DESTINATION_UUID, DESTINATION_DEVICE_ID).join());
+
+      final UUID messageGuid = UUID.randomUUID();
+      final MessageProtos.Envelope message = generateRandomMessage(messageGuid, true);
+      messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, message);
+
+      assertTrue(messagesCache.hasMessagesAsync(DESTINATION_UUID, DESTINATION_DEVICE_ID).join());
+    }
+
+    @Test
+    void getOldestTimestamp() {
+      final int messageCount = 100;
+
+      final List<MessageProtos.Envelope> expectedMessages = new ArrayList<>(messageCount);
+
+      long expectedOldestTimestamp = serialTimestamp;
+      for (int i = 0; i < messageCount; i++) {
+        final UUID messageGuid = UUID.randomUUID();
+        final MessageProtos.Envelope message = generateRandomMessage(messageGuid, i % 2 == 0);
+        messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, message);
+        assertEquals(expectedOldestTimestamp,
+            messagesCache.getEarliestUndeliveredTimestamp(DESTINATION_UUID, DESTINATION_DEVICE_ID).block());
+        expectedMessages.add(message);
+      }
+
+      for (final MessageProtos.Envelope message : expectedMessages) {
+        assertEquals(expectedOldestTimestamp,
+            messagesCache.getEarliestUndeliveredTimestamp(DESTINATION_UUID, DESTINATION_DEVICE_ID).block());
+        messagesCache.remove(DESTINATION_UUID, DESTINATION_DEVICE_ID, UUID.fromString(message.getServerGuid())).join();
+        expectedOldestTimestamp += 1;
+      }
+      assertNull(messagesCache.getEarliestUndeliveredTimestamp(DESTINATION_UUID, DESTINATION_DEVICE_ID).block());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void testGetMessages(final boolean sealedSender) throws Exception {
@@ -212,7 +249,6 @@ class MessagesCacheTest {
         final UUID messageGuid = UUID.randomUUID();
         final MessageProtos.Envelope message = generateRandomMessage(messageGuid, sealedSender);
         messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID, message);
-
         expectedMessages.add(message);
       }
 
@@ -272,7 +308,7 @@ class MessagesCacheTest {
       }
 
       final MessagesCache messagesCache = new MessagesCache(REDIS_CLUSTER_EXTENSION.getRedisCluster(),
-          REDIS_CLUSTER_EXTENSION.getRedisCluster(), sharedExecutorService, messageDeliveryScheduler, sharedExecutorService, cacheClock);
+          messageDeliveryScheduler, sharedExecutorService, cacheClock);
 
       final List<MessageProtos.Envelope> actualMessages = Flux.from(
               messagesCache.get(DESTINATION_UUID, DESTINATION_DEVICE_ID))
@@ -298,7 +334,7 @@ class MessagesCacheTest {
             .get(5, TimeUnit.SECONDS);
 
         final List<MessageProtos.Envelope> messages = messagesCache.getAllMessages(DESTINATION_UUID,
-                DESTINATION_DEVICE_ID)
+                DESTINATION_DEVICE_ID, 0, 10)
             .collectList()
             .toFuture().get(5, TimeUnit.SECONDS);
 
@@ -309,9 +345,9 @@ class MessagesCacheTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void testClearQueueForDevice(final boolean sealedSender) {
-      final int messageCount = 100;
+      final int messageCount = 1000;
 
-      for (final int deviceId : new int[]{DESTINATION_DEVICE_ID, DESTINATION_DEVICE_ID + 1}) {
+      for (final byte deviceId : new byte[]{DESTINATION_DEVICE_ID, DESTINATION_DEVICE_ID + 1}) {
         for (int i = 0; i < messageCount; i++) {
           final UUID messageGuid = UUID.randomUUID();
           final MessageProtos.Envelope message = generateRandomMessage(messageGuid, sealedSender);
@@ -323,15 +359,15 @@ class MessagesCacheTest {
       messagesCache.clear(DESTINATION_UUID, DESTINATION_DEVICE_ID).join();
 
       assertEquals(Collections.emptyList(), get(DESTINATION_UUID, DESTINATION_DEVICE_ID, messageCount));
-      assertEquals(messageCount, get(DESTINATION_UUID, DESTINATION_DEVICE_ID + 1, messageCount).size());
+      assertEquals(messageCount, get(DESTINATION_UUID, (byte) (DESTINATION_DEVICE_ID + 1), messageCount).size());
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void testClearQueueForAccount(final boolean sealedSender) {
-      final int messageCount = 100;
+      final int messageCount = 1000;
 
-      for (final int deviceId : new int[]{DESTINATION_DEVICE_ID, DESTINATION_DEVICE_ID + 1}) {
+      for (final byte deviceId : new byte[]{DESTINATION_DEVICE_ID, DESTINATION_DEVICE_ID + 1}) {
         for (int i = 0; i < messageCount; i++) {
           final UUID messageGuid = UUID.randomUUID();
           final MessageProtos.Envelope message = generateRandomMessage(messageGuid, sealedSender);
@@ -343,7 +379,7 @@ class MessagesCacheTest {
       messagesCache.clear(DESTINATION_UUID).join();
 
       assertEquals(Collections.emptyList(), get(DESTINATION_UUID, DESTINATION_DEVICE_ID, messageCount));
-      assertEquals(Collections.emptyList(), get(DESTINATION_UUID, DESTINATION_DEVICE_ID + 1, messageCount));
+      assertEquals(Collections.emptyList(), get(DESTINATION_UUID, (byte) (DESTINATION_DEVICE_ID + 1), messageCount));
     }
 
     @Test
@@ -362,13 +398,6 @@ class MessagesCacheTest {
                   StandardCharsets.UTF_8)));
     }
 
-    @Test
-    void testGetQueueNameFromKeyspaceChannel() {
-      assertEquals("1b363a31-a429-4fb6-8959-984a025e72ff::7",
-          MessagesCache.getQueueNameFromKeyspaceChannel(
-              "__keyspace@0__:user_queue::{1b363a31-a429-4fb6-8959-984a025e72ff::7}"));
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testGetQueuesToPersist(final boolean sealedSender) {
@@ -383,162 +412,129 @@ class MessagesCacheTest {
       final List<String> queues = messagesCache.getQueuesToPersist(slot, Instant.now().plusSeconds(60), 100);
 
       assertEquals(1, queues.size());
-      assertEquals(DESTINATION_UUID, MessagesCache.getAccountUuidFromQueueName(queues.get(0)));
-      assertEquals(DESTINATION_DEVICE_ID, MessagesCache.getDeviceIdFromQueueName(queues.get(0)));
+      assertEquals(DESTINATION_UUID, MessagesCache.getAccountUuidFromQueueName(queues.getFirst()));
+      assertEquals(DESTINATION_DEVICE_ID, MessagesCache.getDeviceIdFromQueueName(queues.getFirst()));
     }
 
-    @Test
-    void testNotifyListenerNewMessage() {
-      final AtomicBoolean notified = new AtomicBoolean(false);
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testMultiRecipientMessage(final boolean sharedMrmKeyPresent) {
+
+      final ServiceIdentifier destinationServiceId = new AciServiceIdentifier(UUID.randomUUID());
+      final byte deviceId = 1;
+
+      final SealedSenderMultiRecipientMessage mrm = generateRandomMrmMessage(destinationServiceId, deviceId);
+
+      final byte[] sharedMrmDataKey;
+      if (sharedMrmKeyPresent) {
+        sharedMrmDataKey = messagesCache.insertSharedMultiRecipientMessagePayload(mrm);
+      } else {
+        sharedMrmDataKey = "{1}".getBytes(StandardCharsets.UTF_8);
+      }
+
+      final UUID guid = UUID.randomUUID();
+      final MessageProtos.Envelope message = generateRandomMessage(guid, destinationServiceId, true)
+          .toBuilder()
+          // clear some things added by the helper
+          .clearServerGuid()
+          .setSharedMrmKey(ByteString.copyFrom(sharedMrmDataKey))
+          .clearContent()
+          .build();
+      messagesCache.insert(guid, destinationServiceId.uuid(), deviceId, message);
+
+      assertEquals(sharedMrmKeyPresent ? 1 : 0, (long) REDIS_CLUSTER_EXTENSION.getRedisCluster()
+          .withBinaryCluster(conn -> conn.sync().exists(sharedMrmDataKey)));
+
+      final List<MessageProtos.Envelope> messages = get(destinationServiceId.uuid(), deviceId, 1);
+      if (!sharedMrmKeyPresent) {
+        assertTrue(messages.isEmpty());
+      } else {
+
+        assertEquals(1, messages.size());
+        assertEquals(guid, UUID.fromString(messages.getFirst().getServerGuid()));
+        assertFalse(messages.getFirst().hasSharedMrmKey());
+        final SealedSenderMultiRecipientMessage.Recipient recipient = mrm.getRecipients()
+            .get(destinationServiceId.toLibsignal());
+        assertArrayEquals(mrm.messageForRecipient(recipient), messages.getFirst().getContent().toByteArray());
+      }
+
+      final Optional<RemovedMessage> removedMessage = messagesCache.remove(destinationServiceId.uuid(), deviceId, guid)
+          .join();
+
+      assertTrue(removedMessage.isPresent());
+      assertEquals(guid, UUID.fromString(removedMessage.get().serverGuid().toString()));
+      assertTrue(get(destinationServiceId.uuid(), deviceId, 1).isEmpty());
+
+      // updating the shared MRM data is purely async, so we just wait for it
+      assertTimeoutPreemptively(Duration.ofSeconds(1), () -> {
+        boolean exists;
+        do {
+          exists = 1 == REDIS_CLUSTER_EXTENSION.getRedisCluster()
+              .withBinaryCluster(conn -> conn.sync().exists(sharedMrmDataKey));
+        } while (exists);
+      }, "Shared MRM data should be deleted asynchronously");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testGetMessagesToPersist(final boolean sharedMrmKeyPresent) {
+
+      final UUID destinationUuid = UUID.randomUUID();
+      final ServiceIdentifier destinationServiceId = new AciServiceIdentifier(destinationUuid);
+      final byte deviceId = 1;
+
       final UUID messageGuid = UUID.randomUUID();
+      final MessageProtos.Envelope message = generateRandomMessage(messageGuid,
+          new AciServiceIdentifier(destinationUuid), true);
 
-      final MessageAvailabilityListener listener = new MessageAvailabilityListener() {
-        @Override
-        public boolean handleNewMessagesAvailable() {
-          synchronized (notified) {
-            notified.set(true);
-            notified.notifyAll();
+      messagesCache.insert(messageGuid, destinationUuid, deviceId, message);
 
-            return true;
-          }
-        }
+      final SealedSenderMultiRecipientMessage mrm = generateRandomMrmMessage(destinationServiceId, deviceId);
 
-        @Override
-        public boolean handleMessagesPersisted() {
-          return true;
-        }
-      };
-
-      assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
-        messagesCache.addMessageAvailabilityListener(DESTINATION_UUID, DESTINATION_DEVICE_ID, listener);
-        messagesCache.insert(messageGuid, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-            generateRandomMessage(messageGuid, true));
-
-        synchronized (notified) {
-          while (!notified.get()) {
-            notified.wait();
-          }
-        }
-
-        assertTrue(notified.get());
-      });
-    }
-
-    @Test
-    void testNotifyListenerPersisted() {
-      final AtomicBoolean notified = new AtomicBoolean(false);
-
-      final MessageAvailabilityListener listener = new MessageAvailabilityListener() {
-        @Override
-        public boolean handleNewMessagesAvailable() {
-          return true;
-        }
-
-        @Override
-        public boolean handleMessagesPersisted() {
-          synchronized (notified) {
-            notified.set(true);
-            notified.notifyAll();
-
-            return true;
-          }
-        }
-      };
-
-      assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
-        messagesCache.addMessageAvailabilityListener(DESTINATION_UUID, DESTINATION_DEVICE_ID, listener);
-
-        messagesCache.lockQueueForPersistence(DESTINATION_UUID, DESTINATION_DEVICE_ID);
-        messagesCache.unlockQueueForPersistence(DESTINATION_UUID, DESTINATION_DEVICE_ID);
-
-        synchronized (notified) {
-          while (!notified.get()) {
-            notified.wait();
-          }
-        }
-
-        assertTrue(notified.get());
-      });
-    }
-
-
-    /**
-     * Helper class that implements {@link MessageAvailabilityListener#handleNewMessagesAvailable()} by always returning
-     * {@code false}. Its {@code counter} field tracks how many times {@code handleNewMessagesAvailable} has been
-     * called.
-     * <p>
-     * It uses a {@link CompletableFuture} to signal that it has received a “messages available” callback for the first
-     * time.
-     */
-    private static class NewMessagesAvailabilityClosedListener implements MessageAvailabilityListener {
-
-      private int counter;
-
-      private final Consumer<Integer> messageHandledCallback;
-      private final CompletableFuture<Void> firstMessageHandled = new CompletableFuture<>();
-
-      private NewMessagesAvailabilityClosedListener(final Consumer<Integer> messageHandledCallback) {
-        this.messageHandledCallback = messageHandledCallback;
+      final byte[] sharedMrmDataKey;
+      if (sharedMrmKeyPresent) {
+        sharedMrmDataKey = messagesCache.insertSharedMultiRecipientMessagePayload(mrm);
+      } else {
+        sharedMrmDataKey = new byte[]{1};
       }
 
-      @Override
-      public boolean handleNewMessagesAvailable() {
-        counter++;
-        messageHandledCallback.accept(counter);
-        firstMessageHandled.complete(null);
+      final UUID mrmMessageGuid = UUID.randomUUID();
+      final MessageProtos.Envelope mrmMessage = generateRandomMessage(mrmMessageGuid, destinationServiceId, true)
+          .toBuilder()
+          // clear some things added by the helper
+          .clearContent()
+          .setSharedMrmKey(ByteString.copyFrom(sharedMrmDataKey))
+          .build();
+      messagesCache.insert(mrmMessageGuid, destinationUuid, deviceId, mrmMessage);
 
-        return false;
+      final List<MessageProtos.Envelope> messages = messagesCache.getMessagesToPersist(destinationUuid, deviceId, 100);
 
+      if (!sharedMrmKeyPresent) {
+        assertEquals(1, messages.size());
+      } else {
+        assertEquals(2, messages.size());
+
+        assertEquals(mrmMessage.toBuilder()
+                .clearSharedMrmKey()
+                .setContent(ByteString.copyFrom(
+                    mrm.messageForRecipient(mrm.getRecipients().get(destinationServiceId.toLibsignal()))))
+                .build(),
+            messages.getLast());
       }
 
-      @Override
-      public boolean handleMessagesPersisted() {
-        return true;
-      }
+      assertEquals(message.toBuilder()
+              .setServerGuid(messageGuid.toString())
+              .build(),
+          messages.getFirst());
     }
 
-    @Test
-    void testAvailabilityListenerResponses() {
-      final NewMessagesAvailabilityClosedListener listener1 = new NewMessagesAvailabilityClosedListener(
-          count -> assertEquals(1, count));
-      final NewMessagesAvailabilityClosedListener listener2 = new NewMessagesAvailabilityClosedListener(
-          count -> assertEquals(1, count));
-
-      assertTimeoutPreemptively(Duration.ofSeconds(30), () -> {
-        messagesCache.addMessageAvailabilityListener(DESTINATION_UUID, DESTINATION_DEVICE_ID, listener1);
-        final UUID messageGuid1 = UUID.randomUUID();
-        messagesCache.insert(messageGuid1, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-            generateRandomMessage(messageGuid1, true));
-
-        listener1.firstMessageHandled.get();
-
-        // Avoid a race condition by blocking on the message handled future *and* the current notification executor task—
-        // the notification executor task includes unsubscribing `listener1`, and, if we don’t wait, sometimes
-        // `listener2` will get subscribed before `listener1` is cleaned up
-        sharedExecutorService.submit(() -> listener1.firstMessageHandled.get()).get();
-
-        final UUID messageGuid2 = UUID.randomUUID();
-        messagesCache.insert(messageGuid2, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-            generateRandomMessage(messageGuid2, true));
-
-        messagesCache.addMessageAvailabilityListener(DESTINATION_UUID, DESTINATION_DEVICE_ID, listener2);
-
-        final UUID messageGuid3 = UUID.randomUUID();
-        messagesCache.insert(messageGuid3, DESTINATION_UUID, DESTINATION_DEVICE_ID,
-            generateRandomMessage(messageGuid3, true));
-
-        listener2.firstMessageHandled.get();
-      });
-    }
-
-    private List<MessageProtos.Envelope> get(final UUID destinationUuid, final long destinationDeviceId,
+    private List<MessageProtos.Envelope> get(final UUID destinationUuid, final byte destinationDeviceId,
         final int messageCount) {
       return Flux.from(messagesCache.get(destinationUuid, destinationDeviceId))
           .take(messageCount, true)
           .collectList()
           .block();
     }
-
   }
 
   @Nested
@@ -554,15 +550,15 @@ class MessagesCacheTest {
     void setup() throws Exception {
       reactiveCommands = mock(RedisAdvancedClusterReactiveCommands.class);
       asyncCommands = mock(RedisAdvancedClusterAsyncCommands.class);
-      final FaultTolerantRedisCluster mockCluster = RedisClusterHelper.builder()
+      final FaultTolerantRedisClusterClient mockCluster = RedisClusterHelper.builder()
           .binaryReactiveCommands(reactiveCommands)
           .binaryAsyncCommands(asyncCommands)
           .build();
 
       messageDeliveryScheduler = Schedulers.newBoundedElastic(10, 10_000, "messageDelivery");
 
-      messagesCache = new MessagesCache(mockCluster, mockCluster, mock(ExecutorService.class),
-          messageDeliveryScheduler, Executors.newSingleThreadExecutor(), Clock.systemUTC());
+      messagesCache = new MessagesCache(mockCluster, messageDeliveryScheduler,
+          Executors.newSingleThreadExecutor(), Clock.systemUTC());
     }
 
     @AfterEach
@@ -605,7 +601,7 @@ class MessagesCacheTest {
           .thenReturn(Flux.from(emptyFinalPagePublisher))
           .thenReturn(Flux.empty());
 
-      final Flux<?> allMessages = messagesCache.getAllMessages(UUID.randomUUID(), 1L);
+      final Flux<?> allMessages = messagesCache.getAllMessages(UUID.randomUUID(), Device.PRIMARY_ID, 0, 10);
 
       // Why initialValue = 3?
       // 1. messagesCache.getAllMessages() above produces the first call
@@ -679,7 +675,7 @@ class MessagesCacheTest {
       pages.add(generatePage());
       pages.add(generateStaleEphemeralPage());
 
-      when(reactiveCommands.evalsha(any(), any(), any(), any()))
+      when(reactiveCommands.evalsha(any(), any(), any(byte[][].class), any(byte[][].class)))
           .thenReturn(Flux.just(pages.pop()))
           .thenReturn(Flux.just(pages.pop()))
           .thenReturn(Flux.just(pages.pop()))
@@ -688,17 +684,17 @@ class MessagesCacheTest {
       final AsyncCommand<?, ?, ?> removeSuccess = new AsyncCommand<>(mock(RedisCommand.class));
       removeSuccess.complete();
 
-      when(asyncCommands.evalsha(any(), any(), any(), any()))
+      when(asyncCommands.evalsha(any(), any(), any(byte[][].class), any(byte[][].class)))
           .thenReturn((RedisFuture) removeSuccess);
 
-      final Publisher<?> allMessages = messagesCache.get(UUID.randomUUID(), 1L);
+      final Publisher<?> allMessages = messagesCache.get(UUID.randomUUID(), Device.PRIMARY_ID);
 
       StepVerifier.setDefaultTimeout(Duration.ofSeconds(5));
 
       // async commands are used for remove(), and nothing should happen until we are subscribed
-      verify(asyncCommands, never()).evalsha(any(), any(), any(byte[][].class), any(byte[].class));
+      verify(asyncCommands, never()).evalsha(any(), any(), any(byte[][].class), any(byte[][].class));
       // the reactive commands will be called once, to prep the first page fetch (but no remote request would actually be sent)
-      verify(reactiveCommands, times(1)).evalsha(any(), any(), any(byte[][].class), any(byte[].class));
+      verify(reactiveCommands, times(1)).evalsha(any(), any(), any(byte[][].class), any(byte[][].class));
 
       StepVerifier.create(allMessages)
           .expectSubscription()
@@ -708,7 +704,7 @@ class MessagesCacheTest {
           .verify();
 
       assertTrue(pages.isEmpty());
-      verify(asyncCommands, atLeast(1)).evalsha(any(), any(), any(), any());
+      verify(asyncCommands, atLeast(1)).evalsha(any(), any(), any(byte[][].class), any(byte[][].class));
     }
 
     private List<byte[]> generatePage() {
@@ -738,24 +734,96 @@ class MessagesCacheTest {
   }
 
   private MessageProtos.Envelope generateRandomMessage(final UUID messageGuid, final boolean sealedSender) {
-    return generateRandomMessage(messageGuid, sealedSender, serialTimestamp++);
+    return generateRandomMessage(messageGuid, new AciServiceIdentifier(UUID.randomUUID()), sealedSender,
+        serialTimestamp++);
   }
 
-  private MessageProtos.Envelope generateRandomMessage(final UUID messageGuid, final boolean sealedSender,
-      final long timestamp) {
+  private MessageProtos.Envelope generateRandomMessage(final UUID messageGuid,
+      final ServiceIdentifier destinationServiceId, final boolean sealedSender) {
+    return generateRandomMessage(messageGuid, destinationServiceId, sealedSender, serialTimestamp++);
+  }
+
+  private MessageProtos.Envelope generateRandomMessage(final UUID messageGuid,
+      final ServiceIdentifier destinationServiceId, final boolean sealedSender, final long timestamp) {
     final MessageProtos.Envelope.Builder envelopeBuilder = MessageProtos.Envelope.newBuilder()
-        .setTimestamp(timestamp)
+        .setClientTimestamp(timestamp)
         .setServerTimestamp(timestamp)
-        .setContent(ByteString.copyFromUtf8(RandomStringUtils.randomAlphanumeric(256)))
+        .setContent(ByteString.copyFromUtf8(RandomStringUtils.secure().nextAlphanumeric(256)))
         .setType(MessageProtos.Envelope.Type.CIPHERTEXT)
         .setServerGuid(messageGuid.toString())
-        .setDestinationUuid(UUID.randomUUID().toString());
+        .setDestinationServiceId(destinationServiceId.toServiceIdentifierString());
 
     if (!sealedSender) {
-      envelopeBuilder.setSourceDevice(random.nextInt(256))
-          .setSourceUuid(UUID.randomUUID().toString());
+      envelopeBuilder.setSourceDevice(random.nextInt(Device.MAXIMUM_DEVICE_ID) + 1)
+          .setSourceServiceId(UUID.randomUUID().toString());
     }
 
     return envelopeBuilder.build();
+  }
+
+  static SealedSenderMultiRecipientMessage generateRandomMrmMessage(
+      Map<ServiceIdentifier, List<Byte>> destinations) {
+
+    try {
+      final ByteBuffer prefix = ByteBuffer.allocate(7);
+      prefix.put((byte) 0x23); // version
+      writeVarint(prefix, destinations.size()); // recipient count
+      prefix.flip();
+
+      List<ByteBuffer> recipients = new ArrayList<>(destinations.size());
+
+      for (Map.Entry<ServiceIdentifier, List<Byte>> serviceIdentifierAndDeviceIds : destinations.entrySet()) {
+
+        final ServiceIdentifier destination = serviceIdentifierAndDeviceIds.getKey();
+        final List<Byte> deviceIds = serviceIdentifierAndDeviceIds.getValue();
+
+        assert deviceIds.size() < 255;
+
+        final ByteBuffer recipient = ByteBuffer.allocate(17 + 3 * deviceIds.size() + 48);
+
+        recipient.put(destination.toFixedWidthByteArray());
+        for (int i = 0; i < deviceIds.size(); i++) {
+          final int hasMore = i == deviceIds.size() - 1 ? 0x0000 : 0x8000;
+          recipient.put(new byte[]{deviceIds.get(i)}); // device ID
+          recipient.putShort((short) ((100 + deviceIds.get(i)) | hasMore)); // registration ID
+        }
+
+        final byte[] keyMaterial = new byte[48];
+        ThreadLocalRandom.current().nextBytes(keyMaterial);
+        recipient.put(keyMaterial);
+
+        recipients.add(recipient);
+      }
+
+      final byte[] commonPayload = new byte[64];
+      ThreadLocalRandom.current().nextBytes(commonPayload);
+
+      final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      baos.write(prefix.array(), 0, prefix.limit());
+      for (ByteBuffer recipient : recipients) {
+        baos.write(recipient.array());
+      }
+      baos.write(commonPayload);
+
+      return SealedSenderMultiRecipientMessage.parse(baos.toByteArray());
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  static SealedSenderMultiRecipientMessage generateRandomMrmMessage(ServiceIdentifier destination,
+      byte... deviceIds) {
+
+    final Map<ServiceIdentifier, List<Byte>> destinations = new HashMap<>();
+    destinations.put(destination, Arrays.asList(ArrayUtils.toObject(deviceIds)));
+    return generateRandomMrmMessage(destinations);
+  }
+
+  private static void writeVarint(ByteBuffer bb, long n) {
+    while (n >= 0x80) {
+      bb.put((byte) (n & 0x7F | 0x80));
+      n = n >> 7;
+    }
+    bb.put((byte) (n & 0x7F));
   }
 }

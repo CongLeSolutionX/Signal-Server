@@ -1,62 +1,19 @@
 /*
- * Copyright 2013 Signal Messenger, LLC
+ * Copyright 2024 Signal Messenger, LLC
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
 package org.whispersystems.textsecuregcm.configuration;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import io.micrometer.datadog.DatadogConfig;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import io.dropwizard.jackson.Discoverable;
+import io.micrometer.statsd.StatsdConfig;
 import java.time.Duration;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
-import org.whispersystems.textsecuregcm.configuration.secrets.SecretString;
 
-public class DatadogConfiguration implements DatadogConfig {
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type", defaultImpl = DogstatsdConfiguration.class)
+public interface DatadogConfiguration extends StatsdConfig, Discoverable {
 
-  @JsonProperty
-  @NotNull
-  private SecretString apiKey;
+  String getEnvironment();
 
-  @JsonProperty
-  @NotNull
-  private Duration step = Duration.ofSeconds(10);
-
-  @JsonProperty
-  @NotBlank
-  private String environment;
-
-  @JsonProperty
-  @Min(1)
-  private int batchSize = 5_000;
-
-  @Override
-  public String apiKey() {
-    return apiKey.value();
-  }
-
-  @Override
-  public Duration step() {
-    return step;
-  }
-
-  public String getEnvironment() {
-    return environment;
-  }
-
-  @Override
-  public int batchSize() {
-    return batchSize;
-  }
-
-  @Override
-  public String hostTag() {
-    return "host";
-  }
-
-  @Override
-  public String get(final String key) {
-    return null;
-  }
+  Duration getShutdownWaitDuration();
 }

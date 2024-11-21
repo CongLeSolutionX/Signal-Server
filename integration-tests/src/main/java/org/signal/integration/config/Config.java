@@ -5,10 +5,15 @@
 
 package org.signal.integration.config;
 
-import org.whispersystems.textsecuregcm.configuration.DynamoDbClientConfiguration;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import org.whispersystems.textsecuregcm.configuration.DynamoDbClientFactory;
 
-public record Config(String domain,
-                     String rootCert,
-                     DynamoDbClientConfiguration dynamoDbClientConfiguration,
-                     DynamoDbTables dynamoDbTables) {
+public record Config(@NotBlank String domain,
+                     @NotBlank String rootCert,
+                     @NotNull @Valid DynamoDbClientFactory dynamoDbClient,
+                     @NotNull @Valid DynamoDbTables dynamoDbTables,
+                     @NotBlank String prescribedRegistrationNumber,
+                     @NotBlank String prescribedRegistrationCode) {
 }

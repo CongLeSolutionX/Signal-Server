@@ -6,6 +6,7 @@
 package org.whispersystems.textsecuregcm.tests.util;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyByte;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
@@ -14,15 +15,23 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import org.mockito.MockingDetails;
 import org.mockito.stubbing.Stubbing;
+import org.signal.libsignal.protocol.IdentityKey;
+import org.signal.libsignal.protocol.ecc.Curve;
+import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.whispersystems.textsecuregcm.auth.SaltedTokenHash;
+import org.whispersystems.textsecuregcm.entities.AccountAttributes;
 import org.whispersystems.textsecuregcm.storage.Account;
 import org.whispersystems.textsecuregcm.storage.AccountsManager;
+import org.whispersystems.textsecuregcm.storage.DeviceSpec;
 import org.whispersystems.textsecuregcm.storage.Device;
 import org.whispersystems.textsecuregcm.util.SystemMapper;
 
@@ -61,12 +70,27 @@ public class AccountsHelper {
       return markStale ? copyAndMarkStale(account) : account;
     });
 
-    when(mockAccountsManager.updateDevice(any(), anyLong(), any())).thenAnswer(answer -> {
+    when(mockAccountsManager.updateAsync(any(), any())).thenAnswer(answer -> {
       final Account account = answer.getArgument(0, Account.class);
-      final Long deviceId = answer.getArgument(1, Long.class);
+      answer.getArgument(1, Consumer.class).accept(account);
+
+      return CompletableFuture.completedFuture(markStale ? copyAndMarkStale(account) : account);
+    });
+
+    when(mockAccountsManager.updateDevice(any(), anyByte(), any())).thenAnswer(answer -> {
+      final Account account = answer.getArgument(0, Account.class);
+      final byte deviceId = answer.getArgument(1, Byte.class);
       account.getDevice(deviceId).ifPresent(answer.getArgument(2, Consumer.class));
 
       return markStale ? copyAndMarkStale(account) : account;
+    });
+
+    when(mockAccountsManager.updateDeviceAsync(any(), anyByte(), any())).thenAnswer(answer -> {
+      final Account account = answer.getArgument(0, Account.class);
+      final byte deviceId = answer.getArgument(1, Byte.class);
+      account.getDevice(deviceId).ifPresent(answer.getArgument(2, Consumer.class));
+
+      return CompletableFuture.completedFuture(markStale ? copyAndMarkStale(account) : account);
     });
 
     when(mockAccountsManager.updateDeviceLastSeen(any(), any(), anyLong())).thenAnswer(answer -> {
@@ -112,21 +136,21 @@ public class AccountsHelper {
         switch (stubbing.getInvocation().getMethod().getName()) {
           case "getUuid" -> when(updatedAccount.getUuid()).thenAnswer(stubbing);
           case "getPhoneNumberIdentifier" -> when(updatedAccount.getPhoneNumberIdentifier()).thenAnswer(stubbing);
+          case "getIdentifier" -> when(updatedAccount.getIdentifier(stubbing.getInvocation().getArgument(0))).thenAnswer(stubbing);
+          case "isIdentifiedBy" -> when(updatedAccount.isIdentifiedBy(stubbing.getInvocation().getArgument(0))).thenAnswer(stubbing);
           case "getNumber" -> when(updatedAccount.getNumber()).thenAnswer(stubbing);
           case "getUsername" -> when(updatedAccount.getUsernameHash()).thenAnswer(stubbing);
           case "getUsernameHash" -> when(updatedAccount.getUsernameHash()).thenAnswer(stubbing);
+          case "getUsernameLinkHandle" -> when(updatedAccount.getUsernameLinkHandle()).thenAnswer(stubbing);
           case "getDevices" -> when(updatedAccount.getDevices()).thenAnswer(stubbing);
           case "getDevice" -> when(updatedAccount.getDevice(stubbing.getInvocation().getArgument(0))).thenAnswer(stubbing);
-          case "getMasterDevice" -> when(updatedAccount.getMasterDevice()).thenAnswer(stubbing);
-          case "isEnabled" -> when(updatedAccount.isEnabled()).thenAnswer(stubbing);
+          case "getPrimaryDevice" -> when(updatedAccount.getPrimaryDevice()).thenAnswer(stubbing);
           case "isDiscoverableByPhoneNumber" -> when(updatedAccount.isDiscoverableByPhoneNumber()).thenAnswer(stubbing);
           case "getNextDeviceId" -> when(updatedAccount.getNextDeviceId()).thenAnswer(stubbing);
-          case "isPniSupported" -> when(updatedAccount.isPniSupported()).thenAnswer(stubbing);
-          case "isPaymentActivationSupported" -> when(updatedAccount.isPaymentActivationSupported()).thenAnswer(stubbing);
-          case "getEnabledDeviceCount" -> when(updatedAccount.getEnabledDeviceCount()).thenAnswer(stubbing);
+          case "hasCapability" -> when(updatedAccount.hasCapability(stubbing.getInvocation().getArgument(0))).thenAnswer(stubbing);
           case "getRegistrationLock" -> when(updatedAccount.getRegistrationLock()).thenAnswer(stubbing);
-          case "getIdentityKey" -> when(updatedAccount.getIdentityKey()).thenAnswer(stubbing);
-          case "getPhoneNumberIdentityKey" -> when(updatedAccount.getPhoneNumberIdentityKey()).thenAnswer(stubbing);
+          case "getIdentityKey" ->
+              when(updatedAccount.getIdentityKey(stubbing.getInvocation().getArgument(0))).thenAnswer(stubbing);
           case "getBadges" -> when(updatedAccount.getBadges()).thenAnswer(stubbing);
           case "getLastSeen" -> when(updatedAccount.getLastSeen()).thenAnswer(stubbing);
           case "hasLockedCredentials" -> when(updatedAccount.hasLockedCredentials()).thenAnswer(stubbing);
@@ -148,4 +172,43 @@ public class AccountsHelper {
     return argThat(other -> other.getUuid().equals(value.getUuid()));
   }
 
+  public static Account createAccount(final AccountsManager accountsManager, final String e164)
+      throws InterruptedException {
+
+    return createAccount(accountsManager, e164, new AccountAttributes());
+  }
+
+  public static Account createAccount(final AccountsManager accountsManager, final String e164, final AccountAttributes accountAttributes)
+      throws InterruptedException {
+
+    return createAccount(accountsManager, e164, accountAttributes, Curve.generateKeyPair(), Curve.generateKeyPair());
+  }
+
+  public static Account createAccount(final AccountsManager accountsManager,
+      final String e164,
+      final AccountAttributes accountAttributes,
+      final ECKeyPair aciKeyPair,
+      final ECKeyPair pniKeyPair) throws InterruptedException {
+
+    return accountsManager.create(e164,
+        accountAttributes,
+        new ArrayList<>(),
+        new IdentityKey(aciKeyPair.getPublicKey()),
+        new IdentityKey(pniKeyPair.getPublicKey()),
+        new DeviceSpec(
+            accountAttributes.getName(),
+            "password",
+            "OWT",
+            accountAttributes.getCapabilities(),
+            accountAttributes.getRegistrationId(),
+            accountAttributes.getPhoneNumberIdentityRegistrationId(),
+            accountAttributes.getFetchesMessages(),
+            Optional.empty(),
+            Optional.empty(),
+            KeysHelper.signedECPreKey(1, aciKeyPair),
+            KeysHelper.signedECPreKey(2, pniKeyPair),
+            KeysHelper.signedKEMPreKey(3, aciKeyPair),
+            KeysHelper.signedKEMPreKey(4, pniKeyPair)),
+        null);
+  }
 }

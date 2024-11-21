@@ -5,37 +5,67 @@
 
 package org.whispersystems.textsecuregcm.configuration;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonTypeName;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
 import java.time.Duration;
-import javax.validation.constraints.NotEmpty;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
+import software.amazon.awssdk.http.crt.AwsCrtHttpClient;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
+import software.amazon.awssdk.metrics.MetricPublisher;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
+import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 
-public class DynamoDbClientConfiguration {
+@JsonTypeName("default")
+public record DynamoDbClientConfiguration(@NotBlank String region,
+                                          @NotNull Duration clientExecutionTimeout,
+                                          @NotNull Duration clientRequestTimeout,
+                                          @Positive int maxConnections) implements DynamoDbClientFactory {
 
-  private final String region;
-  private final Duration clientExecutionTimeout;
-  private final Duration clientRequestTimeout;
+  public DynamoDbClientConfiguration {
+    if (clientExecutionTimeout == null) {
+      clientExecutionTimeout = Duration.ofSeconds(30);
+    }
 
-  @JsonCreator
-  public DynamoDbClientConfiguration(
-      @JsonProperty("region") final String region,
-      @JsonProperty("clientExcecutionTimeout") final Duration clientExecutionTimeout,
-      @JsonProperty("clientRequestTimeout") final Duration clientRequestTimeout) {
-    this.region = region;
-    this.clientExecutionTimeout = clientExecutionTimeout != null ? clientExecutionTimeout : Duration.ofSeconds(30);
-    this.clientRequestTimeout = clientRequestTimeout != null ? clientRequestTimeout : Duration.ofSeconds(10);
+    if (clientRequestTimeout == null) {
+      clientRequestTimeout = Duration.ofSeconds(10);
+    }
+
+    if (maxConnections == 0) {
+      maxConnections = 50;
+    }
   }
 
-  @NotEmpty
-  public String getRegion() {
-    return region;
+  @Override
+  public DynamoDbClient buildSyncClient(final AwsCredentialsProvider credentialsProvider, final MetricPublisher metricPublisher) {
+    return DynamoDbClient.builder()
+        .region(Region.of(region()))
+        .credentialsProvider(credentialsProvider)
+        .overrideConfiguration(ClientOverrideConfiguration.builder()
+            .apiCallTimeout(clientExecutionTimeout())
+            .apiCallAttemptTimeout(clientRequestTimeout())
+            .addMetricPublisher(metricPublisher)
+            .build())
+        .httpClientBuilder(AwsCrtHttpClient.builder()
+            .maxConcurrency(maxConnections()))
+        .build();
   }
 
-  public Duration getClientExecutionTimeout() {
-    return clientExecutionTimeout;
-  }
-
-  public Duration getClientRequestTimeout() {
-    return clientRequestTimeout;
+  @Override
+  public DynamoDbAsyncClient buildAsyncClient(final AwsCredentialsProvider credentialsProvider, final MetricPublisher metricPublisher) {
+    return DynamoDbAsyncClient.builder()
+        .region(Region.of(region()))
+        .credentialsProvider(credentialsProvider)
+        .overrideConfiguration(ClientOverrideConfiguration.builder()
+            .apiCallTimeout(clientExecutionTimeout())
+            .apiCallAttemptTimeout(clientRequestTimeout())
+            .addMetricPublisher(metricPublisher)
+            .build())
+        .httpClientBuilder(NettyNioAsyncHttpClient.builder()
+            .maxConcurrency(maxConnections()))
+        .build();
   }
 }

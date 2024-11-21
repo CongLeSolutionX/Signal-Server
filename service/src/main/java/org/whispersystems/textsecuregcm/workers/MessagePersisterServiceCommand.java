@@ -5,16 +5,16 @@
 
 package org.whispersystems.textsecuregcm.workers;
 
-import io.dropwizard.Application;
-import io.dropwizard.cli.ServerCommand;
-import io.dropwizard.setup.Environment;
+import io.dropwizard.core.Application;
+import io.dropwizard.core.cli.ServerCommand;
+import io.dropwizard.core.server.DefaultServerFactory;
+import io.dropwizard.core.setup.Environment;
+import io.dropwizard.jetty.HttpsConnectorFactory;
 import java.time.Duration;
 import net.sourceforge.argparse4j.inf.Namespace;
 import net.sourceforge.argparse4j.inf.Subparser;
 import org.whispersystems.textsecuregcm.WhisperServerConfiguration;
-import org.whispersystems.textsecuregcm.configuration.dynamic.DynamicConfiguration;
 import org.whispersystems.textsecuregcm.metrics.MetricsUtil;
-import org.whispersystems.textsecuregcm.storage.DynamicConfigurationManager;
 import org.whispersystems.textsecuregcm.storage.MessagePersister;
 import org.whispersystems.textsecuregcm.util.logging.UncaughtExceptionHandler;
 
@@ -48,25 +48,25 @@ public class MessagePersisterServiceCommand extends ServerCommand<WhisperServerC
 
     UncaughtExceptionHandler.register();
 
-    MetricsUtil.configureRegistries(configuration, environment);
-
     final CommandDependencies deps = CommandDependencies.build("message-persister-service", environment, configuration);
+    MetricsUtil.configureRegistries(configuration, environment, deps.dynamicConfigurationManager());
 
-    final DynamicConfigurationManager<DynamicConfiguration> dynamicConfigurationManager = new DynamicConfigurationManager<>(
-        configuration.getAppConfig().getApplication(),
-        configuration.getAppConfig().getEnvironment(),
-        configuration.getAppConfig().getConfigurationName(),
-        DynamicConfiguration.class);
+    if (configuration.getServerFactory() instanceof DefaultServerFactory defaultServerFactory) {
+      defaultServerFactory.getApplicationConnectors()
+          .forEach(connectorFactory -> {
+            if (connectorFactory instanceof HttpsConnectorFactory h) {
+              h.setKeyStorePassword(configuration.getTlsKeyStoreConfiguration().password().value());
+            }
+          });
+    }
 
-    dynamicConfigurationManager.start();
-
-    final MessagePersister messagePersister = new MessagePersister(deps.messagesCache(), deps.messagesManager(),
+    final MessagePersister messagePersister = new MessagePersister(deps.messagesCache(),
+        deps.messagesManager(),
         deps.accountsManager(),
-        dynamicConfigurationManager,
+        deps.dynamicConfigurationManager(),
         Duration.ofMinutes(configuration.getMessageCacheConfiguration().getPersistDelayMinutes()),
         namespace.getInt(WORKER_COUNT));
 
-    environment.lifecycle().manage(deps.messagesCache());
     environment.lifecycle().manage(messagePersister);
 
     MetricsUtil.registerSystemResourceMetrics(environment);
